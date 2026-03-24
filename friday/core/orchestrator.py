@@ -482,7 +482,8 @@ class FridayCore:
             )
             is_continuation = re.match(
                 r"^(and |also |more |tell me more|dig into|dig deeper|"
-                r"elaborate|expand|gimme more)\b", s
+                r"elaborate|expand|gimme more|what else|anything else|"
+                r"go on|keep going|continue)\b", s
             )
             if (has_reference or is_continuation) and len(s) < 80:
                 # But only if no OTHER domain keyword overrides it
@@ -496,7 +497,11 @@ class FridayCore:
                     r"\b(search|check)\s+x\b",
                     r"\b@\w+\b",
                 ])
-                if not has_override:
+                # Short follow-ups to heavy agents (research, monitor) should use
+                # fast_chat with conversation context, not a full agent ReAct loop.
+                # "tell me more about that" after a web search → fast_chat (8s) not research_agent (90s)
+                HEAVY_AGENTS = {"research_agent", "monitor_agent", "code_agent"}
+                if not has_override and recent_agent not in HEAVY_AGENTS:
                     return (recent_agent, raw)
 
         # ── Comms (email + calendar) ──
@@ -888,9 +893,30 @@ class FridayCore:
         # ── Briefing / catch me up ──
         # (handled separately in Priority 1 — no need here)
 
-        # ── Web research (simple factual queries) ──
-        # Research removed from oneshot — user prefers explicit agent dispatch for research.
-        # Research queries go through the normal routing → research_agent.
+        # ── Web search (simple factual queries) ──
+        # Quick lookups go through oneshot (1 Tavily + 1 LLM format = ~16s).
+        # Deep research still needs @research for multi-page agent work.
+        web_match = re.match(
+            r"(?:what is|what are|what'?s|who is|who are|who'?s|where is|when is|when did|how does|how do|how did)"
+            r"\s+(.+)", s
+        )
+        if not web_match:
+            web_match = re.match(r"(?:search|look up|google|search for|look for|search the web for)\s+(.+)", s)
+        if web_match:
+            query = web_match.group(1).strip().rstrip("?.")
+            if query and len(query) > 2:
+                _ack("looking it up")
+                _status("searching web")
+                from friday.tools.web_tools import search_web
+                result = await search_web(query=raw, num_results=3)
+                if result.success:
+                    return await self._oneshot_format(
+                        raw, result.data, "research_agent", _status, _chunk,
+                        fmt_hint="Answer the question directly using these search results. Be concise.",
+                    )
+                else:
+                    err = result.error.message if result.error else "Search failed."
+                    return self._oneshot_instant(raw, err, "research_agent", _chunk)
 
         return False
 
