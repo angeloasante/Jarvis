@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FRIDAY</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #000;
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    font-family: 'Courier New', monospace;
+  }
+
+  /* ── States ─────────────────────────────────────────── */
+  /* idle     → barely breathing, dark                    */
+  /* listening → woke up, bright pulse                    */
+  /* thinking  → rotating arcs, amber                     */
+  /* speaking  → full waveform dance, lime                */
+
+  .scene {
+    position: relative;
+    width: 400px;
+    height: 400px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* ── Ambient glow layers ─────────────────────────────── */
+  .glow-outer {
+    position: absolute;
+    width: 380px;
+    height: 380px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(200,240,74,0.03) 0%, transparent 70%);
+    animation: breathe 6s ease-in-out infinite;
+    transition: all 0.6s ease;
+  }
+
+  .glow-mid {
+    position: absolute;
+    width: 280px;
+    height: 280px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(200,240,74,0.06) 0%, transparent 70%);
+    animation: breathe 6s ease-in-out infinite 0.5s;
+    transition: all 0.6s ease;
+  }
+
+  /* ── Ring system ────────────────────────────────────── */
+  .rings {
+    position: absolute;
+    width: 280px;
+    height: 280px;
+  }
+
+  .ring {
+    position: absolute;
+    border-radius: 50%;
+    border: 1px solid transparent;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    transition: all 0.8s cubic-bezier(0.23, 1, 0.32, 1);
+  }
+
+  .ring-1 {
+    width: 260px;
+    height: 260px;
+    border-color: rgba(200,240,74, 0.08);
+    animation: ring-spin-slow 20s linear infinite;
+  }
+  .ring-2 {
+    width: 220px;
+    height: 220px;
+    border-color: rgba(200,240,74, 0.12);
+    border-style: dashed;
+    animation: ring-spin-slow 15s linear infinite reverse;
+  }
+  .ring-3 {
+    width: 180px;
+    height: 180px;
+    border-color: rgba(200,240,74, 0.06);
+    animation: ring-spin-slow 25s linear infinite;
+  }
+
+  /* ── SVG canvas ─────────────────────────────────────── */
+  .orb-svg {
+    position: absolute;
+    width: 300px;
+    height: 300px;
+  }
+
+  /* ── Core orb ───────────────────────────────────────── */
+  .core {
+    position: absolute;
+    width: 90px;
+    height: 90px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 38% 35%,
+      rgba(230,255,130,0.9) 0%,
+      rgba(200,240,74,0.7) 30%,
+      rgba(140,180,20,0.5) 60%,
+      rgba(80,120,0,0.3) 100%
+    );
+    box-shadow:
+      0 0 20px rgba(200,240,74,0.4),
+      0 0 60px rgba(200,240,74,0.15),
+      inset 0 0 20px rgba(255,255,255,0.1);
+    animation: core-breathe 4s ease-in-out infinite;
+    transition: all 0.6s cubic-bezier(0.23, 1, 0.32, 1);
+  }
+
+  /* ── FRIDAY label ───────────────────────────────────── */
+  .label {
+    position: absolute;
+    bottom: -50px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: rgba(200,240,74, 0.4);
+    font-size: 11px;
+    letter-spacing: 6px;
+    text-transform: uppercase;
+    white-space: nowrap;
+    transition: all 0.6s ease;
+    font-weight: 400;
+  }
+
+  /* ── Status text ────────────────────────────────────── */
+  .status {
+    position: absolute;
+    bottom: -75px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: rgba(200,240,74, 0.2);
+    font-size: 9px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    white-space: nowrap;
+    transition: all 0.4s ease;
+  }
+
+  /* ── Waveform bars ──────────────────────────────────── */
+  .wave-container {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    opacity: 0;
+    transition: opacity 0.4s ease;
+  }
+
+  .wave-bar {
+    width: 2.5px;
+    background: rgba(200,240,74,0.6);
+    border-radius: 2px;
+    animation: none;
+    height: 4px;
+    transition: all 0.3s ease;
+  }
+
+  /* ── Arcs (thinking state) ──────────────────────────── */
+  .arc {
+    position: absolute;
+    width: 140px;
+    height: 140px;
+    border-radius: 50%;
+    border: 1.5px solid transparent;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) rotate(0deg);
+    opacity: 0;
+    transition: opacity 0.5s ease;
+  }
+
+  .arc-1 {
+    border-top-color: rgba(200,240,74, 0.7);
+    border-right-color: rgba(200,240,74, 0.2);
+    animation: arc-spin 1.2s linear infinite;
+  }
+  .arc-2 {
+    width: 120px;
+    height: 120px;
+    border-bottom-color: rgba(200,240,74, 0.5);
+    border-left-color: rgba(200,240,74, 0.1);
+    animation: arc-spin 1.8s linear infinite reverse;
+  }
+
+  /* ── Particle dots ──────────────────────────────────── */
+  .particles {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  .particle {
+    position: absolute;
+    width: 2px;
+    height: 2px;
+    background: rgba(200,240,74, 0.5);
+    border-radius: 50%;
+    opacity: 0;
+  }
+
+  /* ─────── ANIMATIONS ─────────────────────────────────── */
+
+  @keyframes breathe {
+    0%, 100% { transform: scale(1); opacity: 0.5; }
+    50% { transform: scale(1.08); opacity: 1; }
+  }
+
+  @keyframes core-breathe {
+    0%, 100% { transform: scale(1); box-shadow: 0 0 20px rgba(200,240,74,0.4), 0 0 60px rgba(200,240,74,0.15), inset 0 0 20px rgba(255,255,255,0.1); }
+    50% { transform: scale(1.05); box-shadow: 0 0 30px rgba(200,240,74,0.5), 0 0 80px rgba(200,240,74,0.2), inset 0 0 25px rgba(255,255,255,0.15); }
+  }
+
+  @keyframes ring-spin-slow {
+    from { transform: translate(-50%, -50%) rotate(0deg); }
+    to { transform: translate(-50%, -50%) rotate(360deg); }
+  }
+
+  @keyframes arc-spin {
+    from { transform: translate(-50%, -50%) rotate(0deg); }
+    to { transform: translate(-50%, -50%) rotate(360deg); }
+  }
+
+  @keyframes wave {
+    0%, 100% { height: 4px; }
+    50% { height: var(--h, 20px); }
+  }
+
+  @keyframes particle-float {
+    0% { opacity: 0; transform: translate(var(--sx), var(--sy)) scale(0); }
+    20% { opacity: 0.8; transform: translate(var(--mx), var(--my)) scale(1); }
+    100% { opacity: 0; transform: translate(var(--ex), var(--ey)) scale(0); }
+  }
+
+  /* ─────── STATE CLASSES ──────────────────────────────── */
+
+  /* IDLE — minimal presence */
+  body.state-idle .core {
+    width: 70px;
+    height: 70px;
+    opacity: 0.5;
+    box-shadow: 0 0 12px rgba(200,240,74,0.2), 0 0 30px rgba(200,240,74,0.06);
+  }
+  body.state-idle .ring-1 { border-color: rgba(200,240,74, 0.04); }
+  body.state-idle .ring-2 { border-color: rgba(200,240,74, 0.06); }
+  body.state-idle .ring-3 { border-color: rgba(200,240,74, 0.03); }
+  body.state-idle .label { opacity: 0.3; }
+  body.state-idle .status { opacity: 0; }
+  body.state-idle .glow-outer { opacity: 0.3; }
+  body.state-idle .glow-mid { opacity: 0.3; }
+
+  /* LISTENING — woke up */
+  body.state-listening .core {
+    width: 95px;
+    height: 95px;
+    opacity: 1;
+    box-shadow: 0 0 30px rgba(200,240,74,0.6), 0 0 80px rgba(200,240,74,0.25);
+    animation: core-breathe 2s ease-in-out infinite;
+  }
+  body.state-listening .ring-1 { border-color: rgba(200,240,74, 0.2); animation-duration: 12s; }
+  body.state-listening .ring-2 { border-color: rgba(200,240,74, 0.25); animation-duration: 9s; }
+  body.state-listening .ring-3 { border-color: rgba(200,240,74, 0.15); animation-duration: 16s; }
+  body.state-listening .label { opacity: 0.7; letter-spacing: 8px; }
+  body.state-listening .wave-container { opacity: 0.6; }
+  body.state-listening .glow-outer { opacity: 1; }
+  body.state-listening .glow-mid { opacity: 1; }
+
+  /* THINKING — processing */
+  body.state-thinking .core {
+    width: 80px;
+    height: 80px;
+    background: radial-gradient(circle at 38% 35%,
+      rgba(255,200,80,0.9) 0%,
+      rgba(240,160,40,0.7) 30%,
+      rgba(180,100,10,0.5) 60%,
+      rgba(100,60,0,0.3) 100%
+    );
+    box-shadow: 0 0 20px rgba(240,160,40,0.5), 0 0 60px rgba(240,160,40,0.2);
+    animation: core-breathe 1s ease-in-out infinite;
+  }
+  body.state-thinking .arc { opacity: 1; }
+  body.state-thinking .label { opacity: 0.5; color: rgba(240,180,60,0.5); }
+  body.state-thinking .ring-1 { border-color: rgba(240,160,40, 0.1); animation-duration: 8s; }
+  body.state-thinking .ring-2 { border-color: rgba(240,160,40, 0.15); animation-duration: 6s; }
+  body.state-thinking .ring-3 { opacity: 0; }
+
+  /* SPEAKING — fully alive */
+  body.state-speaking .core {
+    width: 100px;
+    height: 100px;
+    box-shadow: 0 0 40px rgba(200,240,74,0.7), 0 0 100px rgba(200,240,74,0.3), 0 0 200px rgba(200,240,74,0.1);
+    animation: core-speaking 0.15s ease-in-out infinite alternate;
+  }
+  body.state-speaking .wave-container { opacity: 1; }
+  body.state-speaking .ring-1 { border-color: rgba(200,240,74, 0.3); animation-duration: 6s; }
+  body.state-speaking .ring-2 { border-color: rgba(200,240,74, 0.35); animation-duration: 4s; }
+  body.state-speaking .ring-3 { border-color: rgba(200,240,74, 0.2); animation-duration: 8s; }
+  body.state-speaking .label { opacity: 0.9; letter-spacing: 8px; color: rgba(200,240,74,0.9); }
+  body.state-speaking .glow-outer { opacity: 1; animation-duration: 1s; }
+  body.state-speaking .glow-mid { opacity: 1; animation-duration: 0.8s; }
+
+  @keyframes core-speaking {
+    from { transform: scale(1); }
+    to { transform: scale(1.06); }
+  }
+
+</style>
+</head>
+<body class="state-idle">
+
+<div class="scene">
+
+  <!-- Ambient glow -->
+  <div class="glow-outer"></div>
+  <div class="glow-mid"></div>
+
+  <!-- Ring system -->
+  <div class="rings">
+    <div class="ring ring-1"></div>
+    <div class="ring ring-2"></div>
+    <div class="ring ring-3"></div>
+  </div>
+
+  <!-- Thinking arcs -->
+  <div class="arc arc-1"></div>
+  <div class="arc arc-2"></div>
+
+  <!-- SVG for arc segments (listening) -->
+  <svg class="orb-svg" viewBox="0 0 300 300" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <!-- Tick marks on outer ring -->
+    <g stroke="rgba(200,240,74,0.12)" stroke-width="1">
+      <line x1="150" y1="10" x2="150" y2="20"/>
+      <line x1="150" y1="280" x2="150" y2="290"/>
+      <line x1="10" y1="150" x2="20" y2="150"/>
+      <line x1="280" y1="150" x2="290" y2="150"/>
+      <line x1="47" y1="47" x2="54" y2="54"/>
+      <line x1="246" y1="246" x2="253" y2="253"/>
+      <line x1="246" y1="47" x2="253" y2="54" transform="scale(-1,1) translate(-300,0)"/>
+      <line x1="47" y1="246" x2="54" y2="253" transform="scale(1,-1) translate(0,-300)"/>
+    </g>
+    <!-- Data arc segment -->
+    <path d="M 150 25 A 125 125 0 0 1 255 95" stroke="rgba(200,240,74,0.15)" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M 255 205 A 125 125 0 0 1 150 275" stroke="rgba(200,240,74,0.08)" stroke-width="1" stroke-linecap="round"/>
+  </svg>
+
+  <!-- Core orb -->
+  <div class="core"></div>
+
+  <!-- Waveform — shown during listening/speaking -->
+  <div class="wave-container" id="waveform">
+    <!-- bars injected by JS -->
+  </div>
+
+  <!-- Label -->
+  <div class="label">F R I D A Y</div>
+  <div class="status" id="status-text">STANDBY</div>
+
+  <!-- Particles -->
+  <div class="particles" id="particles"></div>
+
+</div>
+
+<script>
+// ── State machine ─────────────────────────────────────────────────
+const STATES = ['idle', 'listening', 'thinking', 'speaking'];
+let currentState = 'idle';
+let waveInterval = null;
+let particleInterval = null;
+
+function setState(state) {
+  if (!STATES.includes(state)) return;
+  document.body.className = `state-${state}`;
+  currentState = state;
+
+  const statusEl = document.getElementById('status-text');
+  const statusMap = {
+    idle: 'STANDBY',
+    listening: 'LISTENING',
+    thinking: 'PROCESSING',
+    speaking: 'SPEAKING'
+  };
+  statusEl.textContent = statusMap[state];
+
+  // Wave animation
+  clearInterval(waveInterval);
+  if (state === 'listening') {
+    startWave('low');
+  } else if (state === 'speaking') {
+    startWave('high');
+  } else {
+    stopWave();
+  }
+
+  // Particles
+  clearInterval(particleInterval);
+  if (state === 'speaking') {
+    particleInterval = setInterval(spawnParticle, 400);
+  } else if (state === 'listening') {
+    particleInterval = setInterval(spawnParticle, 900);
+  }
+}
+
+// ── Waveform ──────────────────────────────────────────────────────
+const waveform = document.getElementById('waveform');
+const BAR_COUNT = 24;
+
+// Build bars
+for (let i = 0; i < BAR_COUNT; i++) {
+  const bar = document.createElement('div');
+  bar.className = 'wave-bar';
+  bar.style.setProperty('--h', `${Math.random() * 20 + 8}px`);
+  waveform.appendChild(bar);
+}
+
+// Position waveform as ring around orb
+waveform.style.cssText = `
+  position: absolute;
+  width: 200px;
+  height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+`;
+
+// Actually lay bars in a circle
+function positionWaveBarsAsRing() {
+  const bars = waveform.querySelectorAll('.wave-bar');
+  const radius = 90;
+  waveform.style.position = 'absolute';
+  waveform.style.width = '220px';
+  waveform.style.height = '220px';
+  waveform.style.display = 'block';
+
+  bars.forEach((bar, i) => {
+    const angle = (i / BAR_COUNT) * Math.PI * 2 - Math.PI / 2;
+    const x = Math.cos(angle) * radius + 110 - 1.25;
+    const y = Math.sin(angle) * radius + 110 - 2;
+    bar.style.position = 'absolute';
+    bar.style.left = `${x}px`;
+    bar.style.top = `${y}px`;
+    bar.style.transformOrigin = '1.25px 50%';
+    bar.style.transform = `rotate(${angle + Math.PI/2}rad)`;
+    bar.style.height = '4px';
+    bar.style.transition = 'height 0.12s ease, opacity 0.4s ease';
+  });
+}
+
+positionWaveBarsAsRing();
+
+function startWave(intensity) {
+  const bars = waveform.querySelectorAll('.wave-bar');
+  const maxH = intensity === 'high' ? 30 : 14;
+  const minH = intensity === 'high' ? 4 : 2;
+
+  waveInterval = setInterval(() => {
+    bars.forEach(bar => {
+      const h = Math.random() * maxH + minH;
+      bar.style.height = `${h}px`;
+      const brightness = 0.4 + Math.random() * 0.6;
+      bar.style.background = `rgba(200,240,74,${brightness})`;
+    });
+  }, 80);
+}
+
+function stopWave() {
+  const bars = waveform.querySelectorAll('.wave-bar');
+  bars.forEach(bar => { bar.style.height = '3px'; });
+}
+
+// ── Particles ─────────────────────────────────────────────────────
+const particleContainer = document.getElementById('particles');
+
+function spawnParticle() {
+  const p = document.createElement('div');
+  p.className = 'particle';
+
+  const angle = Math.random() * Math.PI * 2;
+  const startR = 45 + Math.random() * 20;
+  const endR = 90 + Math.random() * 80;
+
+  const sx = Math.cos(angle) * startR + 150;
+  const sy = Math.sin(angle) * startR + 150;
+  const ex = Math.cos(angle) * endR + 150;
+  const ey = Math.sin(angle) * endR + 150;
+
+  p.style.cssText = `
+    left: ${sx}px;
+    top: ${sy}px;
+    --sx: 0px; --sy: 0px;
+    --ex: ${ex - sx}px; --ey: ${ey - sy}px;
+    --mx: ${(ex - sx) * 0.4}px; --my: ${(ey - sy) * 0.4}px;
+    animation: particle-float ${0.8 + Math.random() * 0.8}s ease-out forwards;
+    width: ${1 + Math.random() * 2}px;
+    height: ${1 + Math.random() * 2}px;
+  `;
+
+  particleContainer.appendChild(p);
+  setTimeout(() => p.remove(), 1800);
+}
+
+// ── Demo cycle (remove when integrating with FRIDAY) ─────────────
+// Cycles through states for preview purposes
+let demoIndex = 0;
+const demoStates = [
+  { state: 'idle',      duration: 3000 },
+  { state: 'listening', duration: 2500 },
+  { state: 'thinking',  duration: 2000 },
+  { state: 'speaking',  duration: 3000 },
+];
+
+function runDemo() {
+  const step = demoStates[demoIndex % demoStates.length];
+  setState(step.state);
+  demoIndex++;
+  setTimeout(runDemo, step.duration);
+}
+
+runDemo();
+
+// ── WebSocket integration point ───────────────────────────────────
+// FRIDAY's Python code connects here to control states
+//
+// const ws = new WebSocket('ws://localhost:8765');
+// ws.onmessage = (event) => {
+//   const { state } = JSON.parse(event.data);
+//   setState(state);
+// };
+//
+// Python side:
+// import asyncio, websockets, json
+//
+// async def send_state(ws, state):
+//     await ws.send(json.dumps({"state": state}))
+//
+// States:
+//   "idle"      → FRIDAY sleeping
+//   "listening" → wake word detected
+//   "thinking"  → processing / agent running
+//   "speaking"  → TTS playing
+
+</script>
+</body>
+</html>

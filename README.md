@@ -1,0 +1,740 @@
+# FRIDAY
+
+**Personal AI Operating System** — inspired by Tony Stark's JARVIS/FRIDAY.
+
+Not a chatbot. Not an assistant. A co-founder. A 3am coding partner who remembers you, understands your slang, and gets things done.
+
+```
+  ███████╗██████╗ ██╗██████╗  █████╗ ██╗   ██╗
+  ██╔════╝██╔══██╗██║██╔══██╗██╔══██╗╚██╗ ██╔╝
+  █████╗  ██████╔╝██║██║  ██║███████║ ╚████╔╝
+  ██╔══╝  ██╔══██╗██║██║  ██║██╔══██║  ╚██╔╝
+  ██║     ██║  ██║██║██████╔╝██║  ██║   ██║
+  ╚═╝     ╚═╝  ╚═╝╚═╝╚═════╝ ╚═╝  ╚═╝   ╚═╝
+```
+
+---
+
+## What Is FRIDAY?
+
+FRIDAY is a multi-agent AI system that runs entirely on your local machine. It routes your requests to specialist agents — code, research, memory, comms, system, household, monitor, briefing, job — and synthesises their work into a single coherent response. No cloud dependency for inference. Your data stays on your machine.
+
+**Core idea:** You talk to FRIDAY. FRIDAY figures out what needs to happen, dispatches the right agent, and delivers the result. You never interact with agents directly.
+
+```
+You: "man, you good?"
+FRIDAY: Always. What's the play?                    ← <1ms, zero LLM
+
+You: "check my emails"
+FRIDAY: Say less. Working on it in the background.  ← instant ack
+  ◈ checking emails                                 ← live status
+FRIDAY (12s) You've got 4 unread. One from Stripe   ← direct dispatch (2 LLM)
+  (critical) — payment webhook failing on prod...
+
+You: "catch me up"
+FRIDAY: On it. Keep chatting, I'll holler when done.
+  ◈ checking emails...                              ← all 8 tools
+  ◈ checking calendar...                              in parallel
+  ◈ checking x_ai...
+  ◈ ✓ emails done
+  ◈ ✓ calendar done
+  ◈ synthesizing briefing...
+FRIDAY (32s) Three things. Global Talent page        ← 1 LLM call (was 12+)
+  updated. Sam George tweeted about digital
+  infrastructure. Calendar's empty...
+```
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- **macOS** (tested on Apple Silicon)
+- **Python 3.12+**
+- **Ollama** — [install here](https://ollama.com)
+- **uv** — Python package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
+
+### Setup
+
+```bash
+# 1. Clone the repo
+git clone <repo-url> && cd JARVIS
+
+# 2. Pull the models
+ollama pull qwen3.5:9b
+ollama pull qwen3:4b
+
+# 3. Create your .env file
+echo 'TAVILY_API_KEY=your-key-here' > .env
+
+# 4. Install dependencies
+uv sync
+
+# 5. Run FRIDAY
+uv run friday
+
+# 6. Run with voice (optional)
+uv run friday --voice
+```
+
+That's it. No Docker. No cloud. No config files to edit.
+
+### Voice Mode
+
+FRIDAY has a fully local voice pipeline — wake word detection, speech-to-text, and text-to-speech. All running on-device.
+
+```bash
+# Start with voice enabled
+uv run friday --voice
+
+# Or toggle at runtime
+/voice
+```
+
+Say **"Hey Jarvis"** to activate, speak your command, and FRIDAY responds through your speakers. CLI and voice work simultaneously — type or talk, your choice.
+
+**Stack:** OpenWakeWord + Silero VAD + MLX Whisper + Kokoro-82M TTS. Zero cloud API calls.
+
+### Getting a Tavily API Key
+
+FRIDAY uses [Tavily](https://tavily.com) for web search. Sign up at [app.tavily.com](https://app.tavily.com) — the free tier gives you 1,000 searches/month.
+
+### Google API Setup
+
+For email and calendar access (optional — FRIDAY works without it, just no comms agent):
+
+```bash
+# 1. Go to https://console.cloud.google.com
+# 2. Create a project → Enable Gmail API + Calendar API
+# 3. Create OAuth2 credentials (Desktop app is simplest)
+# 4. Download the JSON → save as:
+cp ~/Downloads/client_secret_*.json ~/.friday/google_credentials.json
+
+# 5. Authenticate (opens browser for consent):
+uv run python -m friday.tools.google_auth
+```
+
+**Note:** If your app is in "Testing" mode in Google Cloud Console, add your email as a test user under OAuth consent screen → Test users.
+
+---
+
+## Architecture
+
+```
+User Input (CLI / Voice)
+      │
+      ▼
+┌───────────┐
+│  FRIDAY   │  Orchestrator — routes tasks, never does the work itself
+│   Core    │  Memory + conversation context injected every call
+└─────┬─────┘
+      │
+      ├─ 1.   Fast Path       → regex → instant            (0 LLM, <1s)
+      ├─ 1.5  User Override   → @agent → agent dispatch    (0s routing)
+      ├─ 2.   Oneshot         → regex → tool + 1 LLM      (1 LLM, ~15s)
+      ├─ 2.5  Direct Dispatch → LLM picks tool + format    (2 LLM, ~25s)
+      ├─ 3.   Agent Dispatch  → regex → ReAct loop         (2-4 LLM, ~45s)
+      ├─ 4.   Fast Chat       → 1 LLM slim prompt          (1 LLM, ~12s)
+      └─ 5.   Full LLM Route  → fat prompt + dispatch      (4 LLM, ~60s)
+      │
+      ▼  (background thread — user keeps chatting)
+      │
+      ├────────┬────────┬────────┬────────┬────────┬────────┬────────┬────────┬────────┐
+      ▼        ▼        ▼        ▼        ▼        ▼        ▼        ▼        ▼        ▼
+┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐
+│  Code  ││Research││ Memory ││ Comms  ││ System ││  Home  ││Monitor ││Briefing││  Job   ││ Social │
+│  Agent ││ Agent  ││ Agent  ││ Agent  ││ Agent  ││ Agent  ││ Agent  ││ Agent  ││ Agent  ││ Agent  │
+└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘
+    │         │         │         │         │         │         │         │         │         │
+    ▼         ▼         ▼         ▼         ▼         ▼         ▼         ▼         ▼         ▼
+ File I/O  Tavily    ChromaDB  Gmail API AppleScript LG WebOS  Web fetch Monitors  CV Data   X API
+ Terminal  httpx     SQLite    Calendar  Playwright  WakeOnLan Scheduler Emails    WeasyPrint tweepy
+ Git       Known src Semantic  Drafts    Chrome,PDF  Smart Home Diffing  Calendar  Jinja2    Mentions
+                                  │                                        │
+                                  └── asyncio.gather() ────────────────────┘
+                                      (parallel tool execution)
+```
+
+### How Routing Works (7-tier, fastest first)
+
+1. **Fast Path** — regex pattern matching, zero LLM calls (<1s)
+   - Greetings ("hey", "you good", "man, hawfar") → instant canned response
+   - TV commands ("volume to 30", "put on Netflix") → direct tool call
+   - Screenshots, open app, battery, volume → instant
+2. **User Override** — `@agent` syntax bypasses all routing (0s)
+   - `@comms draft email to...` → comms_agent directly
+   - `@research quantum computing` → research_agent directly
+   - Also: `use comms`, `use research`, etc.
+3. **Oneshot** — regex → tool + 1 LLM format (~15s)
+   - "check my email" → `read_emails()` + format
+   - "whats on my calendar" → `get_calendar()` + format
+4. **Direct Tool Dispatch** — 1 LLM picks tool + 1 LLM format (~25s)
+   - Model gets 9 curated tools, picks the right one in 1 call
+   - Covers: email, calendar, X search, web search, memory
+   - Falls through to agent if multi-step needed
+5. **Agent Dispatch** — regex → agent ReAct loop (~45s)
+   - Multi-step tasks: draft+send email, browse+fill forms
+   - Agent's own summary used directly (no synthesis rewrite)
+6. **Fast Chat** — 1 LLM with slim prompt (~12s)
+   - Casual conversation, opinions, reactions
+7. **Full LLM Routing** — fallback for ambiguous queries (~60s)
+   - Model decides which agent, if any
+
+**All agent work runs in background** — user keeps chatting. Live status updates stream to CLI/voice. Parallel tool execution via `asyncio.gather()`.
+
+### Smart Thinking Control
+
+Qwen3.5 has a built-in reasoning mode that generates internal chain-of-thought. This is powerful for complex tasks but wastes time on simple ones.
+
+FRIDAY uses Ollama's native `think` parameter:
+- `think=False` for conversation and tool calls (~1-2s per LLM call)
+- `think=True` for deep reasoning tasks like "explain how async/await works" (~30-60s but higher quality)
+
+This alone took response times from **84-121s down to 5-12s** for conversational messages.
+
+---
+
+## Project Structure
+
+```
+JARVIS/
+├── friday/
+│   ├── cli.py                 # Terminal interface (hacker green aesthetic)
+│   ├── core/
+│   │   ├── config.py          # Model, paths, settings (single source of truth)
+│   │   ├── types.py           # ToolResult, AgentResponse, ErrorCode, Severity
+│   │   ├── llm.py             # Ollama wrapper (chat, streaming, think control)
+│   │   ├── base_agent.py      # ReAct loop base class for all agents
+│   │   ├── tool_dispatch.py   # Direct tool dispatch — 1 LLM picks tool, 1 LLM formats
+│   │   └── orchestrator.py    # FRIDAY Core — 7-tier routing, dispatch, synthesis
+│   ├── agents/
+│   │   ├── code_agent.py      # File ops, terminal, git, debugging
+│   │   ├── research_agent.py  # Web search, page fetching, known sources
+│   │   ├── memory_agent.py    # Store/recall decisions, lessons, context
+│   │   ├── comms_agent.py     # Email (Gmail) + Calendar (macOS/iCloud)
+│   │   ├── system_agent.py    # Mac control, browser, terminal, file ops
+│   │   ├── household_agent.py # Smart home control (LG TV, future: all appliances)
+│   │   ├── monitor_agent.py   # Persistent watchers for URLs, topics, searches
+│   │   ├── briefing_agent.py  # Daily briefings from monitor alerts + email + calendar
+│   │   ├── job_agent.py       # CV tailoring, cover letters, PDF generation
+│   │   └── social_agent.py    # X (Twitter) management
+│   ├── data/
+│   │   └── cv.py              # Structured CV data (single source of truth)
+│   ├── tools/
+│   │   ├── web_tools.py       # Tavily search + httpx page fetch
+│   │   ├── file_tools.py      # Read, write, list, search (with line ranges, content search)
+│   │   ├── terminal_tools.py  # Shell execution, background processes, process management
+│   │   ├── mac_tools.py       # AppleScript, app launcher, screenshots, system info
+│   │   ├── browser_tools.py   # Playwright browser automation (navigate, click, fill, screenshot)
+│   │   ├── memory_tools.py    # ChromaDB + SQLite memory operations
+│   │   ├── email_tools.py     # Gmail read, search, send, draft, label
+│   │   ├── calendar_tools.py  # macOS/iCloud Calendar read + create events
+│   │   ├── tv_tools.py        # LG TV WebOS control + WakeOnLan (18 tools)
+│   │   ├── pdf_tools.py       # PDF read, merge, split, rotate, encrypt, watermark
+│   │   ├── call_tools.py      # Phone, FaceTime, WhatsApp call history
+│   │   ├── x_tools.py         # X (Twitter) API — post, search, mentions
+│   │   ├── monitor_tools.py   # Persistent monitor CRUD + change detection
+│   │   ├── briefing_tools.py  # Briefing queue, digest, alert delivery
+│   │   ├── cv_tools.py        # CV get/tailor, cover letters, PDF generation
+│   │   └── google_auth.py     # Shared OAuth2 for Gmail + Calendar
+│   ├── memory/
+│   │   └── store.py           # Hybrid memory (semantic + structured)
+│   └── skills/                # (Phase 2 — knowledge docs for agents)
+├── Idea/                      # Design docs, system maps, tool specs
+├── docs/
+│   └── progress.md            # Development log
+│   └── background/
+│       └── monitor_scheduler.py # APScheduler background monitor jobs
+├── data/                      # Runtime data (gitignored)
+│   └── memory/
+│       ├── friday.db          # SQLite (conversations, agent calls)
+│       └── chroma/            # ChromaDB (semantic memory vectors)
+├── .env                       # API keys (gitignored)
+├── pyproject.toml             # Project config + dependencies
+└── uv.lock                    # Dependency lock file
+```
+
+---
+
+## Agents
+
+### Code Agent
+
+The hands. Reads, writes, debugs, and runs code.
+
+**Tools:** `read_file`, `write_file`, `list_directory`, `search_files`, `run_command`, `search_web`, `search_memory`
+
+**Capabilities:**
+- Read and modify files with style-matching
+- Run terminal commands (git, npm, python, system)
+- Search the web for documentation
+- Safety checks block dangerous commands (`rm -rf /`, `mkfs`, etc.)
+
+### Research Agent
+
+The eyes. Searches the web, reads full pages, synthesises findings.
+
+**Tools:** `search_web`, `fetch_page`, `store_memory`, `search_memory`
+
+**Capabilities:**
+- Tavily-powered web search with AI-generated answers
+- Full page fetching and HTML stripping (not just snippets)
+- Known source injection — for topics like UK visas, it fetches gov.uk directly
+- Cross-referencing and date-awareness for time-sensitive topics
+
+**Known Sources:**
+| Topic | Authoritative URL |
+|-------|-------------------|
+| UK Global Talent Visa | gov.uk/global-talent |
+| Stripe | stripe.com/docs |
+| Paystack | paystack.com/docs |
+| Supabase | supabase.com/docs |
+| Modal | modal.com/docs |
+| Railway | docs.railway.com |
+| Vercel | vercel.com/docs |
+| Ollama | github.com/ollama/ollama |
+
+### Memory Agent
+
+The brain's filing system. Stores decisions, lessons, and context for future recall.
+
+**Tools:** `store_memory`, `search_memory`, `get_recent_memories`
+
+**Categories:** `project`, `decision`, `lesson`, `preference`, `person`, `general`
+
+**Importance scale:** 1 (trivial) → 10 (critical, never forget)
+
+### Comms Agent
+
+The mouth and schedule. Handles all email and calendar operations.
+
+**Tools:** `read_emails`, `search_emails`, `read_email_thread`, `send_email`, `draft_email`, `send_draft`, `edit_draft`, `get_calendar`, `create_event`
+
+**Capabilities:**
+- Read, search, and triage Gmail (priority-sorted: critical → high → normal)
+- Draft and send emails with Travis's tone (never sends without explicit confirmation)
+- Full draft lifecycle — create, edit, and send Gmail drafts by ID
+- Read macOS/iCloud Calendar (day/week view, next event) — no API keys needed
+- Create calendar events via AppleScript — syncs to iCloud automatically
+- Priority sender flagging — Paystack/Stripe = critical, Railway/GitHub = high
+- Coding hours warning — flags events during 10pm-4am
+- Follow-up awareness — "send it" after discussing a draft routes back to comms agent
+- One-shot patterns — most requests complete in a single tool call
+
+**Safety gates:** `send_email`, `send_draft`, and `create_event` all require `confirm=True`. FRIDAY always previews before acting.
+
+**Setup:** Email requires Google OAuth2 — see [Google API Setup](#google-api-setup) below. Calendar works out of the box (reads native macOS Calendar via AppleScript).
+
+### System Agent
+
+The body. Controls the Mac itself — apps, browser, terminal, files.
+
+**Core Tools (always loaded):** `run_command`, `run_background`, `open_application`, `take_screenshot`, `get_system_info`, `run_applescript`, `read_file`, `list_directory`
+
+**Browser Tools (loaded on demand):** `browser_navigate`, `browser_screenshot`, `browser_click`, `browser_get_text`, `browser_wait_for_login`
+
+**PDF Tools (loaded on demand):** `pdf_read`, `pdf_metadata`, `pdf_merge`, `pdf_split`, `pdf_rotate`, `pdf_encrypt`, `pdf_decrypt`, `pdf_watermark`
+
+**Capabilities:**
+- Open any app from the safe list (Cursor, Chrome, Slack, Finder, etc.)
+- Run terminal commands with safety checks + background processes
+- Take screenshots (saved to `~/Downloads/friday_screenshots/`)
+- Run AppleScript for Mac automation (dark mode, volume, UI control)
+- Automated browsing with **persistent sessions** — uses real Chrome, logins saved permanently
+- **Login detection** — detects login pages, pauses for manual login, then continues
+- Navigate, click, fill forms, read page content
+- System info — CPU, memory, disk, uptime
+- **PDF operations** — read/extract text+tables, merge, split, rotate, encrypt/decrypt, watermark, metadata
+
+**Persistent browser:** Uses your installed Google Chrome with a FRIDAY-specific profile (`~/.friday/browser_data/`). Log in once and sessions are saved — no re-authentication needed.
+
+**Dynamic tool loading:** Browser and PDF tools are only injected when the task mentions them. Base tool count stays at 8 (comfortable for 9B models), scales to 13 (browser) or 16 (PDF) when needed.
+
+**Safety:** Dangerous buttons (pay, delete, submit) require explicit confirmation. Dangerous terminal commands are blocked.
+
+### Household Agent
+
+The home brain. Controls smart devices in Travis's home over local network — no cloud, no accounts.
+
+**Tools:** 18 TV tools — `turn_on_tv`, `turn_off_tv`, `tv_screen_off`, `tv_screen_on`, `tv_volume`, `tv_volume_adjust`, `tv_mute`, `tv_play_pause`, `tv_launch_app`, `tv_close_app`, `tv_list_apps`, `tv_list_sources`, `tv_set_source`, `tv_remote_button`, `tv_type_text`, `tv_notify`, `tv_get_audio_output`, `tv_set_audio_output`, `tv_system_info`, `tv_status`
+
+**Capabilities:**
+- LG TV control via WebOS local API (WiFi, no LG account needed)
+- WakeOnLan to power on the TV from off state
+- **Fast-path routing** — simple commands (volume, mute, launch app, power) bypass the LLM entirely via regex pattern matching. ~200-600ms instead of ~30s
+- Volume control — exact level ("volume to 20") or relative adjust ("turn it up" → +5), with read-back verification
+- Mute/unmute
+- Media playback — pause, resume, stop, rewind, fast-forward
+- App launching — Netflix, YouTube, Spotify, Prime, Disney+, Apple TV, HDMI inputs, with launch verification
+- Screen off/on — audio keeps playing with screen off (Spotify mode)
+- Close apps, list installed apps
+- Input source switching — list and switch HDMI/antenna sources
+- Full remote control — 40+ buttons: navigation, media, numbers (0-9), colours (red/green/yellow/blue), channel up/down, special keys
+- IME text input — type directly into search bars without navigating virtual keyboard
+- Toast notifications — send messages to the TV screen
+- Audio output switching — TV speakers, soundbar, ARC, optical
+- In-app search — LLM handles complex multi-step commands like "search for Black Widow on Disney+"
+- Multi-step commands — "turn on TV and put on Netflix" handled sequentially with boot delay
+- TV status — power state, current volume, active app (friendly names)
+
+**Supported Apps:**
+| Command | App |
+|---------|-----|
+| `netflix` | Netflix |
+| `youtube` | YouTube |
+| `spotify` | Spotify |
+| `prime` / `amazon` | Prime Video |
+| `disney` / `disney+` | Disney+ |
+| `apple tv` | Apple TV |
+| `hdmi1`-`hdmi4` | HDMI inputs |
+| `live tv` | Live TV |
+| `browser` | Web Browser |
+| `settings` | TV Settings |
+
+**Remote Buttons:**
+| Category | Buttons |
+|----------|---------|
+| Navigation | `up`, `down`, `left`, `right`, `ok`, `back`, `home`, `menu`, `exit`, `dash`, `info` |
+| Media | `play`, `pause`, `stop`, `rewind`, `fastforward`, `volume_up`, `volume_down`, `mute`, `channel_up`, `channel_down` |
+| Numbers | `num_0` through `num_9` |
+| Colours | `red`, `green`, `yellow`, `blue` |
+| Special | `asterisk`, `cc` |
+
+**Performance (fast-path):**
+| Command | Time |
+|---------|------|
+| Volume/mute/pause | 165-340ms |
+| Screen off/on | 217-305ms |
+| Status check | 310ms |
+| Volume set (verified) | 517-567ms |
+| App launch (verified) | 2.5-6s |
+| Complex search (LLM) | 30-90s |
+
+**Setup:**
+```bash
+# 1. Add to .env:
+LG_TV_IP=192.168.1.xx       # TV's local IP (check router admin)
+LG_TV_MAC=AA:BB:CC:DD:EE:FF # TV's MAC address (for WakeOnLan)
+
+# 2. Pair with TV (one-time, TV must be on):
+uv run python -m friday.tools.tv_tools
+# Accept the prompt on your TV → save the client key to .env:
+LG_TV_CLIENT_KEY=<key-from-pairing>
+```
+
+**Future:** LG ThinQ API for all LG appliances, smart lights, thermostats.
+
+**How fast-path works:** FRIDAY uses regex pattern matching to detect simple TV commands ("volume to 20", "mute", "put on Netflix") and executes them directly — no LLM inference needed. Only complex commands like "search for Black Widow on Disney+" fall through to the LLM for multi-step reasoning.
+
+### Monitor Agent
+
+The eyes that never sleep. Creates persistent watchers that track URLs, topics, and web searches for material changes.
+
+**Tools:** `create_monitor`, `list_monitors`, `pause_monitor`, `delete_monitor`, `get_monitor_history`, `force_check`
+
+**Capabilities:**
+- Watch specific URLs for content changes (e.g. gov.uk visa pages)
+- Recurring web searches for topic awareness (e.g. "YC W27 deadline")
+- Broad topic monitoring (e.g. "AI visa policy UK")
+- Material change detection — keyword filtering so only relevant changes trigger alerts
+- SHA-256 content hashing with unified diff analysis
+- Importance-based routing: critical = interrupt, high = next interaction, normal = briefing
+- APScheduler background jobs: realtime (15min), hourly, daily, weekly
+
+**Monitor types:**
+| Type | Use case | Example |
+|------|----------|---------|
+| `url` | Watch a specific page | gov.uk/global-talent |
+| `search` | Recurring web search | "YC W27 applications" |
+| `topic` | Broad awareness | "AI immigration policy UK" |
+
+**Smart diffing:** Not everything that changes matters. Nav menu updates, date stamps, minor wording — ignored. New eligibility criteria, deadline changes, policy updates — flagged immediately.
+
+### Briefing Agent
+
+The morning voice. Synthesises monitor alerts, emails, and calendar into tight, actionable briefings.
+
+**Tools:** `get_briefing_queue`, `get_monitor_alerts`, `get_daily_digest`, `mark_briefing_delivered` + `read_emails`, `get_calendar`, `get_call_history` + `search_x`, `get_my_mentions`
+
+**Briefing types:**
+- **Morning briefing** — comprehensive: critical alerts, today's calendar, unread emails, missed calls, X feed highlights, monitor changes
+- **Evening briefing** — what shipped, what's blocked, tomorrow's first event
+- **Quick briefing** — one thing, two sentences, the most important item
+- **"Catch me up"** — checks everything: emails, calls, calendar, monitors, X feed
+
+**X (Twitter) monitoring** — every briefing pulls:
+- **@samgeorgegh** — Ghanaian MP, policy/tech/Ghana news
+- **Galamsey / illegal mining** — breaking news, government action, viral posts
+- **Travel** — viral travel posts, especially Africa-related
+- **AI / Tech** — new AI releases, major announcements, trending posts
+- **@mentions** — anyone who mentioned Travis (surfaced first, actionable)
+
+**Call history:** Reads phone/FaceTime calls (requires Full Disk Access) and WhatsApp calls (always accessible). Surfaces missed calls in briefings.
+
+**Delivery:** Briefing items are marked as delivered after being surfaced, so they never repeat.
+
+**Example:**
+```
+"Oya. Three things.
+ Global Talent Visa page updated — new guidance dropped.
+ Sam George tweeted about digital infrastructure funding.
+ Galamsey trending — government announced new drone surveillance.
+ Calendar's empty. What are we building?"
+```
+
+### Job Agent
+
+The career arm. Doesn't just generate CVs — actually applies to jobs autonomously.
+
+**Tools:** `get_cv`, `tailor_cv`, `write_cover_letter`, `generate_pdf` + `search_web`, `fetch_page` + `browser_navigate`, `browser_screenshot`, `browser_click`, `browser_fill`, `browser_get_text`, `browser_wait_for_login`, `browser_close` + `read_emails`, `search_emails` (15 tools)
+
+**Capabilities:**
+- Structured CV data as single source of truth (`friday/data/cv.py`) — dark sidebar design
+- CV tailoring — reorders and rephrases experience for specific job descriptions
+- Cover letter generation — confident, specific, no corporate fluff
+- PDF generation via WeasyPrint + Jinja2 — dark sidebar A4 layout with lime accent
+- **Autonomous job applications** — browses job sites, reads JDs, tailors CV, fills forms
+- **Email scanning** — finds job openings in Gmail, extracts roles/links/deadlines
+- **Multi-step form filling** — navigates application pages, fills personal details, uploads CV
+- Company/role research via web tools before applying
+- Login detection — pauses for manual login on protected job portals
+- Never invents experience — only reframes existing data
+
+**Safety:** Always screenshots before submit, never clicks submit without Travis confirming.
+
+**Name handling:** Uses "Angelo Asante" (gov name) on all professional documents. "Travis Moore" is casual/preferred only.
+
+**Example commands:**
+```
+"apply for this role: [URL]"
+"check my emails for job openings"
+"go on LinkedIn and apply for AI engineer roles"
+"tailor my CV for [role] at [company]"
+"generate my CV as PDF"
+```
+
+**PDF output:** Saved to `~/.friday/data/cv_output/`
+
+### Social Agent
+
+The voice on X. Posts tweets, checks mentions, searches, engages — all through the X API.
+
+**Tools:** `post_tweet`, `delete_tweet`, `get_my_mentions`, `search_x`, `like_tweet`, `retweet`, `get_x_user`
+
+**Capabilities:**
+- Post tweets (280 char limit enforced), reply, quote-tweet
+- Check @mentions
+- Search recent tweets (last 7 days) — costs credits, used sparingly
+- Like and retweet
+- Look up any public X profile (followers, bio, tweet count)
+- Never posts without Travis confirming the text first
+
+**Credit awareness:** Posting/liking/retweeting is cheap. Searching/lookups cost credits. FRIDAY knows the difference.
+
+**Setup:**
+```bash
+# Add to .env (from X Developer Portal):
+X_CONSUMER_KEY=your_consumer_key
+X_CONSUMER_SECRET=your_consumer_secret
+X_BEARER_TOKEN=your_bearer_token
+X_ACCESS_TOKEN=your_access_token
+X_ACCESS_TOKEN_SECRET=your_access_token_secret
+```
+
+**Example commands:**
+```
+"tweet this: just shipped v0.2"
+"check my mentions"
+"search twitter for AI startups UK"
+"who is @elonmusk"
+"like that tweet"
+```
+
+---
+
+## Memory System
+
+FRIDAY uses a hybrid memory architecture:
+
+| Layer | Tech | Purpose |
+|-------|------|---------|
+| **Semantic** | ChromaDB | "Find memories similar to X" — cosine similarity search |
+| **Structured** | SQLite | Categories, importance scores, timestamps, agent call logs |
+
+Memory is injected into every system prompt so FRIDAY has context about you, your projects, and past decisions. The more you use FRIDAY, the better it knows you.
+
+---
+
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `/quit` | Exit FRIDAY |
+| `/clear` | Reset conversation history |
+| `/memory` | Show recent stored memories |
+
+---
+
+## Personality
+
+FRIDAY isn't generic. It's built for Travis — a Ghanaian founder based in Plymouth, UK who builds at 2-4am. It understands:
+
+- **Ghanaian expressions** — "hawfar", "oya", "chale", "e no do", "time no dey", "sharp sharp"
+- **Energy matching** — casual gets casual, urgent gets urgent
+- **No corporate tone** — no "Certainly!", no bullet-point self-descriptions, no fluff
+- **2am rule** — late night = less polish, more honest
+
+```
+▶ hawfar
+  FRIDAY  E dey. You good? What are we doing.
+
+▶ chale this thing no dey work
+  FRIDAY  What broke. Show me.
+
+▶ time no dey
+  FRIDAY  Sharp sharp. What's the priority.
+```
+
+---
+
+## Tech Stack
+
+| Component | Technology | Why |
+|-----------|-----------|-----|
+| **LLM (primary)** | Qwen3.5-9B via Ollama | 9B params, fast on Apple Silicon, thinking toggle, Apache 2.0 |
+| **LLM (fast)** | Qwen3-4B via Ollama | 4B params, lightweight tasks, dual-model architecture |
+| **Package Manager** | uv | 10-100x faster than pip |
+| **Web Search** | Tavily | Built for AI agents, returns structured data, AI answers |
+| **Vector DB** | ChromaDB | Lightweight, embedded, cosine similarity |
+| **Structured DB** | SQLite | Zero-config, built into Python |
+| **CLI Framework** | Rich + prompt_toolkit | Beautiful output, history, auto-suggest |
+| **HTTP** | httpx | Async, modern, follow redirects |
+| **Google APIs** | google-api-python-client + google-auth-oauthlib | Gmail OAuth2 |
+| **Calendar** | AppleScript + macOS Calendar.app | Native iCloud/local calendar, no API keys |
+| **Browser Automation** | Playwright + Chrome (persistent sessions) | Navigate, click, fill, screenshot, login detection |
+| **TV Control** | pywebostv + wakeonlan | LG TV local API over WiFi, no cloud dependency |
+| **Background Jobs** | APScheduler | Persistent monitor scheduling, async event loop integration |
+| **PDF Generation** | WeasyPrint + Jinja2 | CV and cover letter PDF rendering, clean A4 layout |
+| **PDF Processing** | pypdf + pdfplumber | Read, merge, split, rotate, encrypt, extract text/tables |
+| **Social Media** | tweepy (X API v2) | Post, search, mentions, engage — pay-as-you-go credits |
+| **Wake Word** | OpenWakeWord (ONNX) | MIT, runs on CPU, "hey_jarvis" model |
+| **Voice Activity** | Silero VAD v6 | <1ms/chunk, enterprise-grade end-of-speech detection |
+| **Speech-to-Text** | MLX Whisper (whisper-small) | 10x faster than whisper.cpp on Apple Silicon |
+| **Text-to-Speech** | Kokoro-82M (ONNX) | 82M params, natural voice, Apache 2.0, ~500ms synthesis |
+| **Audio I/O** | python-sounddevice | Callback-based, clean macOS support |
+
+---
+
+## Development Roadmap
+
+### Phase 1 — Core System (Complete)
+- [x] Multi-agent orchestrator with smart routing
+- [x] 10 specialist agents (Code, Research, Memory, Comms, System, Household, Monitor, Briefing, Job, Social)
+- [x] Tool library (web, file, terminal, memory, email, calendar, mac, browser)
+- [x] Gmail integration — read, search, send, draft, edit draft, send draft, label, thread
+- [x] macOS/iCloud Calendar integration — day/week view, create events (no API keys needed)
+- [x] Mac control — AppleScript, app launcher, screenshots, volume, dark mode
+- [x] Browser automation — Playwright + Chrome with persistent sessions and login detection
+- [x] LG TV control — WebOS local API + WakeOnLan (no cloud)
+- [x] Persistent monitoring — URL/topic/search watchers with material change detection
+- [x] Briefing system — morning/evening/quick briefings from monitor alerts + email + calendar
+- [x] Job agent — CV tailoring, cover letters, PDF generation (WeasyPrint + Jinja2)
+- [x] Background scheduler — APScheduler runs monitor checks on configurable intervals
+- [x] Background process management — start, monitor, kill
+- [x] Hybrid memory (ChromaDB + SQLite)
+- [x] Streaming CLI with hacker aesthetic
+- [x] Smart thinking control (84s → 5s for simple queries)
+- [x] Personality + Ghanaian expression understanding
+- [x] Known source injection for research
+- [x] Vague query detection (ask before wasting time)
+- [x] Conversation context injection (agents remember recent turns)
+- [x] Live tool call status during agent work
+- [x] Compacted tool results for 9B model compatibility
+
+### Phase 2 — Voice Pipeline (Complete)
+- [x] Voice pipeline — OpenWakeWord + Silero VAD + MLX Whisper + Kokoro TTS
+- [x] `--voice` flag and `/voice` runtime toggle
+- [x] Response filter (strips code/markdown for speech, condenses to 3 sentences)
+- [x] Activation chime, barge-in support, feedback prevention
+- [x] Both CLI and voice work simultaneously (shared FridayCore instance)
+
+### Phase 3 — Performance & Background Agents (Complete)
+- [x] Direct agent dispatch — regex skips routing LLM (4 → 2 LLM calls per query)
+- [x] Direct briefing — parallel tools + 1 LLM synthesis (12+ → 1 LLM call)
+- [x] Parallel tool execution — `asyncio.gather()` when multiple tools in one response
+- [x] Background agent execution — user keeps chatting while agents work
+- [x] Live status updates — `◈ checking emails...` → `◈ synthesizing...`
+- [x] Streaming synthesis — agent results stream token-by-token to CLI and voice
+- [x] Expanded fast path — greeting prefixes, Ollama error recovery
+- [x] Unified routing — all queries go through dispatch, LLM always has DISPATCH_TOOL
+
+### Phase 3.5 — Direct Tool Dispatch & 7-Tier Routing (Complete)
+- [x] Direct tool dispatch — LLM picks from 9 curated tools in 1 call (agents become fallback)
+- [x] 7-tier routing: fast path → user override → oneshot → direct dispatch → agent → fast chat → full LLM
+- [x] User override — `@comms`, `@research`, `@social` etc. bypasses routing entirely
+- [x] Dual-model architecture — Qwen3.5:9B (primary) + Qwen3:4B (fast)
+- [x] Briefing per-task timeouts — prevents one slow API from blocking everything
+- [x] Oneshot error fallbacks — instant error responses instead of falling through to slow agents
+- [x] Fast chat tier — slim prompt, truncated context, 10-15s conversational responses
+- [x] TTFT as primary UX metric — median 3.7s, 69% responsive (<6s)
+
+### Phase 4 — Intelligence
+- [ ] Skill system (knowledge docs agents read before executing)
+- [ ] Fine-tuning data collection from sessions
+- [ ] QLoRA fine-tune on Qwen3.5-9B (personality + routing baked into weights)
+- [ ] Additional agents (Git, Deploy, Database)
+- [ ] Modal fallback for burst GPU capacity
+
+### Phase 5 — Ecosystem
+- [ ] Redis async messaging between agents
+- [ ] MCP server integration
+- [ ] Screenpipe integration (screen context awareness)
+- [ ] Self-improving loop (auto fine-tune from corrections)
+- [ ] Multi-user support
+- [ ] Plugin/extension system
+
+---
+
+## Configuration
+
+All config lives in `friday/core/config.py`:
+
+```python
+MODEL_NAME = "qwen3.5:9b"           # Primary model (tool dispatch + formatting)
+MODEL_NAME_FAST = "qwen3:4b"       # Fast model (lightweight tasks)
+OLLAMA_BASE_URL = "http://localhost:11434"
+SQLITE_DB_PATH = MEMORY_DIR / "friday.db"
+CHROMA_PERSIST_DIR = str(MEMORY_DIR / "chroma")
+```
+
+Environment variables (`.env`):
+```
+TAVILY_API_KEY=your-key-here
+```
+
+Google credentials (managed by `google_auth.py`):
+```
+~/.friday/google_credentials.json   # OAuth2 client config (from Google Cloud Console)
+~/.friday/google_token.json          # Auto-saved after first auth
+```
+
+---
+
+## Design Philosophy
+
+1. **Local first** — inference runs on your machine. No API calls for the core LLM.
+2. **Agents are specialists** — each agent gets focused context and tools. No god-agent.
+3. **Memory is identity** — FRIDAY remembers you. That's what makes it personal.
+4. **Speed over perfection** — streaming, think control, fast routing. Latency kills the vibe.
+5. **Personality is not optional** — a tool without personality is just a tool.
+
+---
+
+## License
+
+Apache 2.0
+
+---
+
+*Built at 2am in Plymouth, UK.*

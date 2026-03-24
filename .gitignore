@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+data/
+*.egg-info/
+dist/
+build/
+.DS_Store
+.env
+TODO
+TODO2.md
+uv.lock
+wobbly-zooming-llama.md
+test_tv_e2e.py
