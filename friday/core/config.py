@@ -11,7 +11,7 @@ SKILLS_DIR = PROJECT_ROOT / "friday" / "skills"
 
 # Ollama
 OLLAMA_BASE_URL = "http://localhost:11434"
-MODEL_NAME = "qwen3.5:9b"       # All tasks — tool calling, chat, formatting
+MODEL_NAME = "qwen3.5:9b"       # All tasks — reliable tool calling (8/8 accuracy), chat, formatting
 
 # Memory
 SQLITE_DB_PATH = MEMORY_DIR / "friday.db"

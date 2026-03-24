@@ -696,8 +696,15 @@ Streamed result → CLI (token-by-token) / Voice (sentence-by-sentence TTS)
   - Both missed `search_emails` → picked `read_emails` for "find emails from stripe"
 - [x] Removed dual-model config — qwen3.5:9b used for all tasks (tool calling, chat, formatting)
 - [ ] Benchmark **qwen3.5:4b** (downloading) — scored 97.5% on BFCL, potential fast model candidate
-- [ ] Benchmark **mistral-small** (downloading) — "low latency function calling", 24B params
-- [ ] If either beats 9b on speed with comparable accuracy, re-introduce dual-model architecture
+- [x] Benchmark **mistral-small** (24B, 14GB) — 14.4s avg tool pick (2.7x faster than 9b), 7/8 accuracy
+  - **Dealbreaker:** hangs on non-tool queries when tools are provided (Ollama template issue)
+  - Fast for tool picking but unusable as primary model — can't handle chat + tools together
+  - Potential future use: tool-only model in dual-model setup (only used in dispatch, never chat)
+- [x] **Dispatch pre-filter rewrite** — chat queries now skip dispatch entirely
+  - Old: skip if <15 chars and no keywords (most chat still went through dispatch → 40-90s wasted)
+  - New: only enter dispatch if query contains tool keywords (email, calendar, search, etc.)
+  - Result: chat queries dropped from 40-90s to **8-15s** (5-10x faster)
+- [ ] If a future model beats 9b on speed with comparable accuracy AND handles chat+tools, re-introduce dual-model
 
 ---
 

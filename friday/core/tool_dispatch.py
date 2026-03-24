@@ -98,13 +98,18 @@ async def try_direct_dispatch(
     if not DIRECT_TOOL_SCHEMAS:
         return False
 
-    # Skip dispatch for obvious chat — don't waste 10s on LLM tool selection
+    # Only enter dispatch if query looks like it needs a tool.
+    # This is the inverse of the old approach: instead of skipping short chat,
+    # we only proceed if we see tool-related keywords. Everything else goes
+    # straight to fast_chat (10-15s) instead of wasting 25-80s on tool selection.
     s = user_input.strip().lower()
-    if len(s) < 15 and not any(kw in s for kw in (
-        "email", "search", "calendar", "tweet", "post", "check", "find",
-        "look", "open", "screenshot", "remember", "recall", "read", "draft",
-        "send", "monitor", "battery", "volume", "file", "call", "mention",
-    )):
+    TOOL_KEYWORDS = (
+        "email", "mail", "inbox", "search", "calendar", "schedule", "tweet",
+        "post", "check", "find", "look up", "remember", "recall", "read",
+        "draft", "send", "mention", "web", "what is", "who is", "what are",
+        "look for", "search for",
+    )
+    if not any(kw in s for kw in TOOL_KEYWORDS):
         return False
 
     # Build messages — slim prompt + minimal context
