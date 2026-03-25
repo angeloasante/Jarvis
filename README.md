@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Built by](https://img.shields.io/badge/Built%20by-Travis%20Moore-green.svg)](https://github.com/angeloasante)
 
-> **Copyright 2024-2026 Travis Moore (Angelo Asante)**
+> **Copyright Travis Moore (Angelo Asante)**
 > Licensed under the Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE) for details.
 
 **Personal AI Operating System** — inspired by Tony Stark's JARVIS/FRIDAY.
@@ -58,7 +58,6 @@ FRIDAY (32s) Three things. Global Talent page        ← 1 LLM call (was 12+)
 
 - **macOS** (tested on Apple Silicon)
 - **Python 3.12+**
-- **Ollama** — [install here](https://ollama.com)
 - **uv** — Python package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
 
 ### Setup
@@ -67,24 +66,52 @@ FRIDAY (32s) Three things. Global Talent page        ← 1 LLM call (was 12+)
 # 1. Clone the repo
 git clone <repo-url> && cd JARVIS
 
-# 2. Pull the models
-ollama pull qwen3.5:9b
-ollama pull qwen3:4b
+# 2. Install dependencies
+uv sync
 
 # 3. Create your .env file
 echo 'TAVILY_API_KEY=your-key-here' > .env
-
-# 4. Install dependencies
-uv sync
-
-# 5. Run FRIDAY
-uv run friday
-
-# 6. Run with voice (optional)
-uv run friday --voice
 ```
 
-That's it. No Docker. No config files to edit. Cloud inference is optional — see [Cloud Inference](#cloud-inference) below.
+Now pick how you want FRIDAY to think:
+
+### Option A: Cloud via Groq (Recommended)
+
+Fast. Qwen3-32B at 535 tok/s, sub-100ms latency, ~6.5s average response. Free tier available.
+
+```bash
+# Add your Groq API key — get one free at https://console.groq.com
+echo 'GROQ_API_KEY=gsk_your_key_here' >> .env
+
+# Run FRIDAY
+uv run friday
+```
+
+That's it. No models to download, no GPU needed. If Groq goes down mid-session, FRIDAY silently falls back to local Ollama (if installed).
+
+### Option B: Fully Local via Ollama
+
+Private. Zero cloud calls. Everything runs on your machine. Slower (~10-25s per call on M4 Air) but no API keys, no data leaves your device.
+
+```bash
+# Install Ollama and pull the model
+brew install ollama
+ollama pull qwen3.5:9b
+ollama serve
+
+# Run FRIDAY (no GROQ_API_KEY in .env = fully local)
+uv run friday
+```
+
+For detailed Ollama setup, troubleshooting, and hardware requirements — see [docs/ollama-setup.md](docs/ollama-setup.md).
+
+### Option C: Both (Hybrid)
+
+Set `GROQ_API_KEY` **and** have Ollama running. FRIDAY uses Groq for speed, falls back to Ollama automatically if cloud is unreachable. Best of both worlds.
+
+### Switching Between Modes
+
+Add or remove `GROQ_API_KEY` from `.env` and restart FRIDAY. That's it. No code changes, no config flags.
 
 ### Voice Mode
 
@@ -265,7 +292,9 @@ JARVIS/
 │   └── skills/                # (Phase 5 — knowledge docs for agents)
 ├── Idea/                      # Design docs, system maps, tool specs
 ├── docs/
-│   └── progress.md            # Development log
+│   ├── progress.md            # Development log
+│   ├── ollama-setup.md        # Local LLM setup guide (Ollama)
+│   ├── friday-glasses-integration.md  # Halo glasses integration spec
 │   └── background/
 │       └── monitor_scheduler.py # APScheduler background monitor jobs
 ├── data/                      # Runtime data (gitignored)
@@ -791,34 +820,7 @@ cloud_chat()
 
 ## Cloud vs Local — Your Choice
 
-FRIDAY auto-detects what's available. No config flags, no code changes — just environment variables.
-
-### Option A: Cloud (Groq) — Fast, recommended
-
-```bash
-# Add your free Groq API key to .env
-echo 'GROQ_API_KEY=gsk_your_key_here' >> .env
-
-# Get a key at https://console.groq.com (free tier available)
-```
-
-All LLM calls go through Groq (~1s each). LLM-based intent classification is enabled. If Groq goes down mid-session, FRIDAY silently falls back to local Ollama.
-
-### Option B: Fully Local — Private, no cloud
-
-```bash
-# Just don't set GROQ_API_KEY (or remove it from .env)
-# Make sure Ollama is running:
-ollama pull qwen3.5:9b
-ollama serve
-
-# Run FRIDAY as normal
-uv run friday
-```
-
-All LLM calls go through local Ollama (~10-25s each on M4 Air). Intent classification uses regex instead of LLM. 100% private, zero data leaves your machine.
-
-### How it works under the hood
+FRIDAY auto-detects what's available. No config flags, no code changes — just environment variables. See [Quick Start](#quick-start) for setup.
 
 ```
 GROQ_API_KEY set?
@@ -829,9 +831,16 @@ GROQ_API_KEY set?
   └─ No  → cloud_chat() routes to local Ollama (~10-25s per call)
            classify_intent() skips, regex handles all routing
            Zero cloud calls, fully offline capable
+
+ELEVENLABS_API_KEY set?
+  ├─ Yes → TTS uses ElevenLabs Flash v2.5 (~75ms streaming)
+  │        Falls back to Kokoro if cloud fails
+  │
+  └─ No  → TTS uses Kokoro-82M ONNX (~500ms local synthesis)
+           Zero cloud calls, fully offline
 ```
 
-To switch between modes: add or remove `GROQ_API_KEY` from `.env` and restart FRIDAY. That's it.
+To switch: add or remove the API key from `.env` and restart FRIDAY. That's it.
 
 ---
 
@@ -874,69 +883,6 @@ Google credentials (managed by `google_auth.py`):
 3. **Memory is identity** — FRIDAY remembers you. That's what makes it personal.
 4. **Speed over perfection** — streaming, think control, fast routing. Latency kills the vibe.
 5. **Personality is not optional** — a tool without personality is just a tool.
-
----
-
-## Setting Up Ollama (Local LLM)
-
-Ollama runs LLMs locally on your Mac. FRIDAY uses it as the local inference backend (and as fallback when cloud is unavailable).
-
-### Install Ollama
-
-```bash
-# Download from https://ollama.com or use Homebrew:
-brew install ollama
-```
-
-This installs the `ollama` CLI and the Ollama app. On first launch, it sets up the local server at `http://localhost:11434`.
-
-### Pull the Model
-
-```bash
-# Pull the model FRIDAY uses (Qwen 3.5 9B, ~6GB download)
-ollama pull qwen3.5:9b
-```
-
-This downloads the quantized model to `~/.ollama/models/`. It only downloads once — subsequent runs use the cached model.
-
-### Start the Server
-
-```bash
-# Option 1: Launch the Ollama app (from Applications or Spotlight)
-# The app runs the server in the background with a menu bar icon.
-
-# Option 2: Start from terminal
-ollama serve
-```
-
-The server must be running for FRIDAY to use local inference. If you're using cloud (Groq), the server is only needed as a fallback.
-
-### Verify It Works
-
-```bash
-# Quick test — should respond in a few seconds
-ollama run qwen3.5:9b "hello"
-
-# Check the server is running
-curl http://localhost:11434/api/tags
-```
-
-### Hardware Requirements
-
-| Mac | RAM | Performance |
-|-----|-----|------------|
-| M1/M2/M3/M4 (any) | 16GB+ | Works well, 10-25s per call |
-| M1/M2/M3/M4 Pro/Max | 32GB+ | Faster, can run larger models |
-| Intel Mac | 16GB+ | Works but slower (CPU only) |
-
-The model uses ~6GB of RAM. Ollama keeps it loaded in memory (`keep_alive: -1`) so subsequent calls are faster — no reload time.
-
-### Troubleshooting
-
-- **"connection refused"** — Ollama server isn't running. Launch the app or run `ollama serve`.
-- **"model not found"** — Run `ollama pull qwen3.5:9b` to download it.
-- **Slow responses** — Normal on fanless Macs (M4 Air). GPU throttles under sustained load. Use cloud (Groq) for speed.
-- **Out of memory** — Close other heavy apps. The 9B model needs ~6GB free RAM.
 
 ---
 
