@@ -1,5 +1,11 @@
 # FRIDAY
 
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Built by](https://img.shields.io/badge/Built%20by-Travis%20Moore-green.svg)](https://github.com/angeloasante)
+
+> **Copyright 2024-2026 Travis Moore (Angelo Asante)**
+> Licensed under the Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE) for details.
+
 **Personal AI Operating System** — inspired by Tony Stark's JARVIS/FRIDAY.
 
 Not a chatbot. Not an assistant. A co-founder. A 3am coding partner who remembers you, understands your slang, and gets things done.
