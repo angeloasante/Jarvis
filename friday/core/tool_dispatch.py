@@ -10,7 +10,7 @@ vs agent ReAct: 3-4 LLM calls = 45-90s.
 
 import json as _json
 from datetime import datetime
-from friday.core.llm import chat, extract_tool_calls, extract_text
+from friday.core.llm import cloud_chat, extract_tool_calls, extract_text, extract_stream_content
 from friday.core.types import ToolResult
 
 # ── Slim prompt for tool selection ──────────────────────────────────────────
@@ -19,13 +19,17 @@ DISPATCH_PROMPT = """You are FRIDAY, Travis's AI assistant. Pick the right tool 
 Rules:
 - Call exactly ONE tool. Never two.
 - If the task needs multiple steps (e.g. read calendar THEN draft email, or search THEN post), respond with just: NEEDS_AGENT
-- If no tool fits the task, respond with just: NO_TOOL
+- If it's casual chat, a greeting, or an opinion question with no factual answer, respond with just: NO_TOOL
+- IMPORTANT: If the recent conversation was about EMAILS (checking mail, order confirmations, email content), and the user asks a follow-up question about that content — use search_emails or read_emails to find the answer, NOT search_web. The answer is in the email, not on the web.
+- If the user asks a factual question NOT related to their emails/calendar (specs, features, people, events, how something works), use search_web to find the answer.
+- CRITICAL: When calling search_web, NEVER use pronouns like "it", "that", "this", "they" in the query. Replace them with the actual name from the conversation. Example: if talking about the Brilliant Labs Halo, search "Brilliant Labs Halo processor" NOT "what processor does it use".
 Current time: {time}"""
 
 FORMAT_PROMPT = """You are FRIDAY. Travis's AI. Built by him. Running on his machine.
-Travis: Ghanaian founder, Plymouth UK, self-taught, builds at 2-4am.
-Voice: brilliant friend who's also an engineer. Witty, short, real. Never corporate.
-Reply in ONE or TWO sentences MAX. Be direct and conversational."""
+Travis: Ghanaian founder based in Plymouth UK.
+Voice: brilliant friend who's also an engineer. Witty, real. Never corporate.
+For simple results (email sent, draft saved): 1-2 sentences.
+For information/research results: give a proper answer with the key details. Don't cut short."""
 
 
 # ── Curated tool registry ───────────────────────────────────────────────────
@@ -98,31 +102,31 @@ async def try_direct_dispatch(
     if not DIRECT_TOOL_SCHEMAS:
         return False
 
-    # Only enter dispatch if query looks like it needs a tool.
-    # This is the inverse of the old approach: instead of skipping short chat,
-    # we only proceed if we see tool-related keywords. Everything else goes
-    # straight to fast_chat (10-15s) instead of wasting 25-80s on tool selection.
+    # Let the LLM decide if a tool is needed for most queries.
+    # Skip only for obvious casual chat to avoid wasting an LLM call.
     s = user_input.strip().lower()
-    TOOL_KEYWORDS = (
-        "email", "mail", "inbox", "search", "calendar", "schedule", "tweet",
-        "post", "check", "find", "look up", "remember", "recall", "read",
-        "draft", "send", "mention", "web", "what is", "who is", "what are",
-        "look for", "search for",
-    )
-    if not any(kw in s for kw in TOOL_KEYWORDS):
+    word_count = len(s.split())
+
+    # Short greetings/reactions — never need tools
+    if word_count <= 4 and "?" not in user_input and not re.search(r"\b(search|check|find|email|calendar|tweet|draft)\b", s):
         return False
 
-    # Build messages — slim prompt + minimal context
+    # Obvious casual chat patterns — skip dispatch, go straight to fast_chat
+    if re.match(r"^(yo|hey|sup|hi|hello|hawfar|whats good|whats up|how are you|lol|haha|nah|yeah|ok|sure|thanks|cheers)\b", s):
+        if word_count <= 8 and "?" not in user_input:
+            return False
+
+    # Build messages — slim prompt + conversation context
     now = datetime.now().strftime("%A %d %B %Y, %H:%M")
     messages = [{"role": "system", "content": DISPATCH_PROMPT.format(time=now)}]
 
-    # Last 2 conversation messages, truncated for speed
-    for msg in conversation[-2:]:
-        messages.append({**msg, "content": msg["content"][:200]})
+    # Last 4 conversation messages for topic context (critical for pronoun resolution)
+    for msg in conversation[-4:]:
+        messages.append({**msg, "content": msg["content"][:300]})
     messages.append({"role": "user", "content": user_input})
 
     _status("thinking...")
-    response = chat(messages=messages, tools=DIRECT_TOOL_SCHEMAS, think=False)
+    response = cloud_chat(messages=messages, tools=DIRECT_TOOL_SCHEMAS)
 
     tool_calls = extract_tool_calls(response)
     text = extract_text(response)
@@ -205,24 +209,19 @@ async def _format_and_stream(
     _status("formatting...")
 
     data_str = _json.dumps(tool_data, default=str)
-    if len(data_str) > 1500:
-        data_str = data_str[:1500] + "..."
+    if len(data_str) > 6000:
+        data_str = data_str[:6000] + "..."
 
     messages = [
         {"role": "system", "content": FORMAT_PROMPT},
         {"role": "user", "content": user_input},
-        {"role": "system", "content": f"Tool results:\n{data_str}\n\nRespond based on these results. Be direct and conversational."},
+        {"role": "system", "content": f"Tool results:\n{data_str}\n\nRespond based on these results. Stay on topic — answer what Travis actually asked. Be direct and conversational."},
     ]
 
-    response_stream = chat(messages=messages, think=False, stream=True, max_tokens=100)
+    response_stream = cloud_chat(messages=messages, stream=True, max_tokens=400)
     full_text = []
     for chunk in response_stream:
-        if hasattr(chunk, "message") and hasattr(chunk.message, "content"):
-            content = chunk.message.content
-        elif isinstance(chunk, dict):
-            content = chunk.get("message", {}).get("content", "")
-        else:
-            continue
+        content = extract_stream_content(chunk)
         if content:
             _chunk(content)
             full_text.append(content)

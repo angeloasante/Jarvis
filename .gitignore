@@ -9,6 +9,9 @@ build/
 .env
 TODO
 TODO2.md
+TODO3.md
+TODO4.md
+TODO5.md
 uv.lock
 wobbly-zooming-llama.md
 test_tv_e2e.py

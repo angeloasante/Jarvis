@@ -6,8 +6,8 @@
 Inspired by Tony Stark's JARVIS/FRIDAY. Not a chatbot. A co-founder, a 3am coding partner.
 
 - **Repo**: `~/Desktop/JARVIS`
-- **Model**: Qwen3.5-9B (local via Ollama)
-- **Stack**: Python 3.12, uv, Ollama, ChromaDB, SQLite, Tavily, Rich
+- **Model**: Qwen3-32B (cloud via Groq) + Qwen3.5-9B (local Ollama fallback)
+- **Stack**: Python 3.12, uv, Groq API, Ollama, ChromaDB, SQLite, Tavily, Rich
 - **Entry point**: `uv run friday` or `uv run python -m friday.cli`
 
 ---
@@ -621,8 +621,10 @@ Streamed result → CLI (token-by-token) / Voice (sentence-by-sentence TTS)
 
 | Key | Value | Location |
 |-----|-------|----------|
-| Model (primary) | `qwen3.5:9b` | `friday/core/config.py` |
-| Model (fast) | `qwen3:4b` | `friday/core/config.py` |
+| Cloud Model | `qwen/qwen3-32b` | `friday/core/config.py` |
+| Cloud API Key | `.env` | `GROQ_API_KEY` |
+| Cloud Base URL | `https://api.groq.com/openai/v1` | `friday/core/config.py` |
+| Model (local fallback) | `qwen3.5:9b` | `friday/core/config.py` |
 | Ollama URL | `http://localhost:11434` | `friday/core/config.py` |
 | SQLite DB | `data/memory/friday.db` | `friday/core/config.py` |
 | ChromaDB | `data/memory/chroma/` | `friday/core/config.py` |
@@ -708,4 +710,297 @@ Streamed result → CLI (token-by-token) / Voice (sentence-by-sentence TTS)
 
 ---
 
-*Last updated: 2026-03-24*
+## Phase 3.6 — Cloud Inference via Groq (COMPLETE)
+
+**Target**: Cut response times from 54s avg to <15s by moving LLM inference to cloud. Keep local Ollama as automatic fallback.
+
+**Why**: The M4 MacBook Air is fanless. Under sustained LLM load, GPU thermally throttles 2-15x. Prompt eval (processing input tokens) takes 5-25s per call on the local 9B model. A 2-call search query costs 25-45s. Agent tasks cost 45-90s. Cloud inference eliminates the bottleneck entirely.
+
+**Why Groq**: Sub-100ms latency, 535 tok/s generation, OpenAI-compatible API (same SDK for Groq/Fireworks/Together/Modal), $0.29/M input tokens (~17,000 queries per $10). Zero deployment, zero cold starts.
+
+### Implementation
+
+#### Cloud LLM Backend (`friday/core/llm.py`)
+- [x] Added `cloud_chat()` — wraps OpenAI SDK, targets Groq API
+- [x] `_normalize_openai_response()` — converts OpenAI ChatCompletion to same dict format as Ollama (so `extract_tool_calls()` and `extract_text()` work unchanged)
+- [x] Automatic fallback — if no API key or cloud fails, silently routes to local `chat()`
+- [x] Fallback logging — `logging.warning()` with error details instead of silent exception swallowing
+- [x] Tool schema compatibility — detects already-wrapped OpenAI format (`{"type": "function", "function": {...}}`) to prevent double-wrapping
+- [x] `_ThinkingFilter` class — character-by-character streaming filter that strips `<think>...</think>` blocks from Qwen 3 reasoning output
+- [x] `_filtered_stream()` — wraps OpenAI streams through the thinking filter
+- [x] `extract_stream_content()` — unified helper for both Ollama (`chunk.message.content`) and OpenAI (`chunk.choices[0].delta.content`) stream formats
+- [x] `/no_think` system prompt injection for Qwen models to suppress reasoning mode
+- [x] `strip_thinking()` safety net for non-streamed responses
+
+#### Config (`friday/core/config.py`)
+- [x] `CLOUD_API_KEY` — from `GROQ_API_KEY` env var
+- [x] `CLOUD_BASE_URL` — defaults to `https://api.groq.com/openai/v1`
+- [x] `CLOUD_MODEL_NAME` — defaults to `qwen/qwen3-32b`
+- [x] `USE_CLOUD` — auto-enabled when API key is present
+
+#### Files Modified
+| File | Change |
+|------|--------|
+| `friday/core/llm.py` | Added `cloud_chat()`, streaming helpers, thinking filter |
+| `friday/core/config.py` | Added cloud config vars |
+| `friday/core/orchestrator.py` | All `chat()` → `cloud_chat()` (fast_chat, oneshot, dispatch, briefing, routing) |
+| `friday/core/tool_dispatch.py` | Both LLM calls → `cloud_chat()` |
+| `friday/core/base_agent.py` | ReAct loop → `cloud_chat()` |
+| `friday/agents/research_agent.py` | Tool pick + answer → `cloud_chat()` |
+| `friday/background/memory_processor.py` | → `cloud_chat()` (currently disabled but ready) |
+| `.env` | Added `GROQ_API_KEY` |
+| `pyproject.toml` | Added `openai` dependency |
+
+### Model Comparison
+
+Tested 4 models on Groq with a 12-query Halo glasses conversation (search, follow-ups, tool use, casual chat):
+
+| Model | Avg Time | Fast (<15s) | Tool Accuracy | Issues |
+|-------|----------|-------------|--------------|--------|
+| Llama 3.3 70B | 8.2s | 9/12 | 60% | String-typed args, malformed XML tool calls, invented tool names |
+| Llama 3.1 8B | 14.1s | 8/12 | 85% | Wrong answers (Halo = "video game"), hallucinated specs |
+| Kimi K2 | 12.1s | 7/12 | 70% | 35-48s on some follow-ups, empty responses |
+| **Qwen3-32B** | **6.5s** | **23/27** | **100%** | Zero tool failures, best personality match |
+
+### Comprehensive Test Results (Qwen3-32B, 27 queries)
+
+| Category | Queries | Avg Time | Fast (<15s) |
+|----------|---------|----------|-------------|
+| CHAT | 4 | 1.2s | 4/4 |
+| SEARCH | 4 | 6.8s | 4/4 |
+| FOLLOW | 3 | 5.1s | 2/3 |
+| DISPATCH | 4 | 5.3s | 4/4 |
+| AGENT | 3 | 8.7s | 2/3 |
+| SWITCH | 3 | 4.2s | 3/3 |
+| EDGE | 3 | 11.4s | 2/3 |
+| VIBE | 3 | 9.1s | 2/3 |
+| **Total** | **27** | **6.5s** | **23/27 (85%)** |
+
+### Bugs Found & Fixed
+
+| Bug | Root Cause | Fix |
+|-----|-----------|-----|
+| Tool schema double-wrapping | Schemas stored in OpenAI format were wrapped again by `cloud_chat()` → `{"type": "function", "function": {"type": "function", ...}}` | Detect already-wrapped schemas before wrapping |
+| Silent fallback to local | `except Exception` caught all errors and fell back silently — made test results inconsistent | Added `logging.warning()` with error details |
+| Llama 70B malformed tool calls | Generated string args, malformed XML, fake tool names | Switched to Qwen 3 32B (zero failures) |
+| Qwen 3 thinking block leaks | Reasoning model dumps `<think>...</think>` into output | `_ThinkingFilter` class + `/no_think` injection + `strip_thinking()` |
+| `_fast_chat` still slow after wiring | Initially kept local for privacy | Moved to `cloud_chat()` per user request |
+
+### Before vs After
+
+| Query Type | Local Only (Phase 3.5) | With Groq (Phase 3.6) | Improvement |
+|-----------|----------------------|----------------------|-------------|
+| Search query | 25-45s | 3-5s | ~8x |
+| Agent task | 45-90s | 5-10s | ~9x |
+| Casual chat | 10-25s | 0.5-2s | ~10x |
+| Briefing | 30-40s | 8-15s | ~3x |
+| Fast path | <1s | <1s | Same |
+| **Average** | **54s** | **6.5s** | **8x** |
+
+### Switching to Fully Local
+
+Remove `GROQ_API_KEY` from `.env`. `cloud_chat()` auto-falls back to local Ollama. No code changes needed. Everything works, just slower (10-25s per LLM call).
+
+---
+
+## Phase 3.7 — Orchestrator Split + LLM Routing (COMPLETE)
+
+**Target**: Split 1955-line orchestrator into focused modules. Replace regex-only agent routing with LLM classification (Groq, ~1s) + regex fallback.
+
+### Why We Did This
+
+1. **Orchestrator was doing 7 jobs in one file** — personality, routing, fast path, oneshot, briefing, dispatch, synthesis. Hard to read, hard to modify.
+2. **Regex routing was weak** — pattern matching can't handle ambiguous queries like "what processor does the M4 use" (is that system_agent or research_agent?). LLM classification gets it right.
+3. **Groq makes LLM classification free** — at ~1s per call, adding an LLM classify step costs nothing. The old regex approach existed only because local Ollama took 10-25s per call.
+
+### Orchestrator Split
+
+| File | Lines | Responsibility |
+|------|-------|---------------|
+| `friday/core/prompts.py` | 255 | PERSONALITY, PERSONALITY_SLIM, SYSTEM_PROMPT, DISPATCH_TOOL, thinking control |
+| `friday/core/router.py` | 510 | `classify_intent()` (LLM), `match_agent()` (regex), `is_likely_chat()`, `needs_agent()` |
+| `friday/core/fast_path.py` | 173 | `fast_path()`, `match_fast()` — TV, greetings, zero-LLM instant commands |
+| `friday/core/oneshot.py` | 313 | `try_oneshot()`, `_oneshot_format()`, `_oneshot_instant()` |
+| `friday/core/briefing.py` | 166 | `direct_briefing()`, `direct_briefing_streamed()` |
+| `friday/core/orchestrator.py` | 603 | Thin `FridayCore` class — dispatch, synthesis, process methods |
+| **Total** | **~2020** | Same logic, zero behavior change |
+
+Design decisions:
+- Extracted functions take **explicit params** (conversation, memory, session_id) instead of `self`
+- Conversation mutation works via **list pass-by-reference** — no return values needed
+- Only `FridayCore` is imported externally (from `friday/cli.py`) — no breaking changes
+
+### LLM-Based Intent Classification
+
+Priority 3 in the routing chain now uses **Groq LLM classification first** (~1s), with regex `match_agent()` as automatic fallback:
+
+```python
+# Priority 3: LLM classification (Groq ~1s) → regex fallback
+match = classify_intent(user_input, conversation) or match_agent(user_input, conversation, memory)
+```
+
+- `classify_intent()` — slim 100-token prompt, `max_tokens=20`, returns agent name or "CHAT"
+- If cloud unavailable or LLM returns unexpected output → falls through to regex
+- If no `GROQ_API_KEY` set → `classify_intent()` returns `None` immediately, regex handles everything
+
+**LLM Classification Test Results (10 queries):**
+
+| Query | Expected | Got | Time |
+|-------|----------|-----|------|
+| check my email for anything from Amazon | comms_agent | comms_agent ✓ | 23s |
+| what processor does the M4 MacBook Air use | research_agent | system_agent ✗ | 24s |
+| search x for what people are saying about Claude | social_agent | social_agent ✓ | 23s |
+| take a screenshot | system_agent | system_agent ✓ | 24s |
+| turn on the tv and put on netflix | household_agent | household_agent ✓ | 2s |
+| remember that my RAEng application is due March 30 | memory_agent | memory_agent ✓ | 4s |
+| catch me up | briefing_agent | briefing_agent ✓ | 23s |
+| draft an email to john about the meeting | comms_agent | comms_agent ✓ | 23s |
+| whats good bruv | CHAT | CHAT ✓ | 14s |
+| tailor my cv for a ML engineer role at Google | job_agent | job_agent ✓ | 12s |
+
+**Score: 9/10** (the one miss is caught by earlier oneshot regex at Priority 2 anyway)
+
+Note: The 22-24s times above are from the **full LLM routing test** (Priority 5, fat system prompt). The new `classify_intent()` uses a slim 100-token prompt with `max_tokens=20` — expected ~1s on Groq.
+
+### Research Agent Benchmarks (Groq)
+
+| Query | Total Time | Breakdown |
+|-------|-----------|-----------|
+| "what processor does the M4 MacBook Air use" | **5.1s** | 0.8s tool pick + search + 4.3s format |
+| "who is Sam Altman and what is he known for" | **3.7s** | 0.5s tool pick + search + 3.2s format |
+| "what are the latest features in Claude 4" | **5.8s** | 0.3s tool pick + search + 5.5s format |
+| **Average** | **4.9s** | 2 Groq LLM calls + Tavily search |
+
+Compare to local Ollama: **45-90s** for the same queries (9-18x slower).
+
+### Cloud vs Local — Full Comparison
+
+| Path | Local Ollama (M4 Air) | Groq Cloud | Speedup |
+|------|----------------------|------------|---------|
+| Fast path (greetings, TV) | <1s | <1s | Same (no LLM) |
+| Oneshot (email, calendar, search) | 25-45s | 3-5s | ~8x |
+| Direct dispatch (LLM picks tool) | 20-40s | 3-5s | ~7x |
+| Research agent (2 LLM + search) | 45-90s | 4-6s | ~12x |
+| Agent dispatch (ReAct loop) | 45-90s | 5-10s | ~9x |
+| Fast chat (casual) | 10-25s | 0.5-2s | ~10x |
+| LLM routing (full prompt) | 30-60s | 8-15s | ~4x |
+| **Average across all paths** | **~54s** | **~5s** | **~10x** |
+
+### Open Source: Cloud vs Local Switching
+
+FRIDAY auto-detects cloud availability at startup:
+
+```
+GROQ_API_KEY set in .env?
+  ├─ Yes → all LLM calls go through Groq (~1s each)
+  │        classify_intent() uses LLM for smart routing
+  │        Falls back to local Ollama if Groq is down
+  │
+  └─ No  → all LLM calls go through local Ollama (~10-25s each)
+           classify_intent() skips immediately, regex handles routing
+           100% private, zero cloud calls
+```
+
+No code changes, no config flags. Just add or remove the API key.
+
+---
+
+## Phase 4 — Voice Pipeline v2: Always-On Ambient Listening (COMPLETE)
+
+**Target**: Replace wake-word activation with always-on ambient listening. FRIDAY hears everything, transcribes continuously, and activates when you say "Friday" naturally mid-conversation. Cloud TTS via ElevenLabs for low-latency speech.
+
+### Why
+
+The Phase 2 voice pipeline required "Hey Jarvis" wake word → speak → wait. That's not how you talk to someone in the room. The goal: FRIDAY is always listening. You're on a call with a friend, you say "Friday, what do you think?" and it has the full conversation context. No wake word, no button, no mode switch.
+
+### Always-On Ambient Listening (`friday/voice/pipeline.py`) — REWRITTEN
+- [x] Mic stays open permanently — all speech is transcribed via Silero VAD + MLX Whisper
+- [x] Rolling transcript buffer (5 minutes) — stores all ambient speech with timestamps
+- [x] Trigger word detection — regex scans transcripts for "Friday" (configurable via `TRIGGER_WORDS`)
+- [x] Ambient context injection — when triggered, FRIDAY gets the last 2 minutes of conversation (up to 10 segments) as context
+- [x] Follow-up window (15 seconds) — after FRIDAY responds, any speech within 15s is treated as directed at FRIDAY without needing the trigger word again
+- [x] Mute during response — mic pauses during TTS to prevent feedback loops
+- [x] `/listening-off` and `/listening-on` CLI commands to toggle ambient listening
+- [x] Removed wake word dependency (OpenWakeWord no longer needed)
+
+### Cloud TTS — ElevenLabs Flash v2.5 (`friday/voice/tts.py`) — REWRITTEN
+- [x] Primary: ElevenLabs Flash v2.5 streaming (~75ms first byte latency)
+- [x] Fallback: Kokoro-82M ONNX (local, fully offline)
+- [x] Auto-switch: `ELEVENLABS_API_KEY` set → cloud, unset → local Kokoro
+- [x] Persistent httpx client — reuses TCP connections across sentences (saves ~100-200ms per sentence vs new connection each time)
+- [x] `optimize_streaming_latency: 3` — ElevenLabs param prioritizing speed over quality
+- [x] Real-time PCM streaming via `sd.OutputStream` — audio plays as chunks arrive
+- [x] Barge-in support — `Speaker.stop()` interrupts mid-speech
+
+### Noise & Hallucination Filtering (`pipeline.py`)
+- [x] `_is_noise_or_hallucination()` — multi-layer filter for non-speech transcripts:
+  - Too short (<4 chars)
+  - Exact hallucination match ("thank you", "thanks for watching", "subscribe", etc.)
+  - Parenthetical sound descriptions: "(engine revving)", "(screaming)", "(dramatic music)"
+  - Broken parentheticals: "Music)", "(crowd"
+  - Single noise words: "music", "applause", "laughter", "silence", "static", etc.
+  - Two-word noise descriptions: "engine revving", "crowd cheering"
+- [x] Filter runs before transcript buffer — noise never enters ambient context
+
+### VAD Tuning (`friday/voice/config.py`)
+- [x] `VAD_THRESHOLD` raised from 0.5 → 0.7 (filters background music/TV better)
+- [x] `VAD_MIN_SPEECH_MS` raised from 300 → 400ms (filters short music bursts)
+- [x] `VAD_SILENCE_MS = 800` — end-of-speech detection
+
+### Cloud STT (Explored, Abandoned)
+- [x] Built `cloud_stt.py` — ElevenLabs Scribe v2 Realtime via WebSocket
+- [x] Added client-side Silero VAD gate (only speech sent to cloud)
+- [x] Added chunk batching (~160ms per WebSocket message)
+- [x] Tuned server-side VAD params (stricter thresholds)
+- [x] **Abandoned** — too slow in practice, got stuck for 2+ minutes. Local STT (Silero VAD + MLX Whisper) is faster and more reliable
+
+### Cloud vs Local — Voice Components
+
+```
+ELEVENLABS_API_KEY set?
+  ├─ Yes → TTS uses ElevenLabs Flash v2.5 (~75ms streaming)
+  │        Falls back to Kokoro if cloud fails
+  │
+  └─ No  → TTS uses Kokoro-82M ONNX (~500ms local synthesis)
+           Zero cloud calls, fully offline
+
+STT is always local:
+  Mic → Silero VAD → MLX Whisper → transcript
+  (Fast, reliable, no cloud dependency)
+```
+
+To switch TTS: add or remove `ELEVENLABS_API_KEY` from `.env`. That's it.
+
+### Config (`friday/core/config.py`)
+- [x] `ELEVENLABS_API_KEY` — from env var
+- [x] `ELEVENLABS_VOICE_ID` — defaults to "George" (`JBFqnCBsd6RMkjVDRZzb`)
+- [x] `ELEVENLABS_MODEL` — defaults to `eleven_flash_v2_5`
+- [x] `USE_CLOUD_TTS` — auto-enabled when API key present
+
+### Files Modified/Created
+
+| File | Change |
+|------|--------|
+| `friday/voice/pipeline.py` | Rewritten — always-on ambient listening, trigger word, follow-up window, noise filter |
+| `friday/voice/tts.py` | Rewritten — ElevenLabs streaming (primary) + Kokoro (fallback) |
+| `friday/voice/config.py` | Updated — trigger words, transcript buffer, VAD tuning |
+| `friday/voice/cloud_stt.py` | Created then abandoned — ElevenLabs Scribe WebSocket (too slow) |
+| `friday/core/config.py` | Added ElevenLabs config vars |
+| `friday/cli.py` | Added `/listening-off` and `/listening-on` commands |
+| `pyproject.toml` | Added `websockets` dependency |
+
+### Bugs Found & Fixed
+
+| Bug | Root Cause | Fix |
+|-----|-----------|-----|
+| Background music/TV transcribed as "(engine revving)", "Music)" | No client-side filtering — everything sent to STT | `_is_noise_or_hallucination()` pattern filter catches all non-speech |
+| Noise transcripts pollute LLM ambient context | Noise entered rolling transcript buffer | Filter runs before buffer insertion |
+| Cloud STT stuck for 2+ minutes | ElevenLabs Scribe WebSocket too slow/unreliable | Switched to always-local Silero VAD + MLX Whisper |
+| Music triggers VAD at threshold 0.5 | Silero VAD too sensitive for ambient noise | Raised `VAD_THRESHOLD` to 0.7, `VAD_MIN_SPEECH_MS` to 400 |
+| TTS slow — new HTTP connection per sentence | `httpx.stream()` creates new TCP connection each time | Persistent `httpx.Client` with keep-alive, reused across sentences |
+| "dig?" after FRIDAY response gets no reply | Follow-up speech needs trigger word "Friday" | 15-second follow-up window — any speech treated as directed at FRIDAY |
+| SQLite thread safety error in voice thread | Voice runs in separate thread from main | `check_same_thread=False` in sqlite3.connect() |
+
+---
+
+*Last updated: 2026-03-25*

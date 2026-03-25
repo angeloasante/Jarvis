@@ -17,7 +17,7 @@ Not a chatbot. Not an assistant. A co-founder. A 3am coding partner who remember
 
 ## What Is FRIDAY?
 
-FRIDAY is a multi-agent AI system that runs entirely on your local machine. It routes your requests to specialist agents — code, research, memory, comms, system, household, monitor, briefing, job — and synthesises their work into a single coherent response. No cloud dependency for inference. Your data stays on your machine.
+FRIDAY is a multi-agent AI system that routes your requests to specialist agents — code, research, memory, comms, system, household, monitor, briefing, job — and synthesises their work into a single coherent response. Runs hybrid: cloud inference via Groq for speed (6.5s avg), with automatic fallback to fully local Ollama when offline or if you prefer privacy.
 
 **Core idea:** You talk to FRIDAY. FRIDAY figures out what needs to happen, dispatches the right agent, and delivers the result. You never interact with agents directly.
 
@@ -78,11 +78,11 @@ uv run friday
 uv run friday --voice
 ```
 
-That's it. No Docker. No cloud. No config files to edit.
+That's it. No Docker. No config files to edit. Cloud inference is optional — see [Cloud Inference](#cloud-inference) below.
 
 ### Voice Mode
 
-FRIDAY has a fully local voice pipeline — wake word detection, speech-to-text, and text-to-speech. All running on-device.
+FRIDAY has an always-on ambient voice pipeline. The mic stays open — FRIDAY hears and transcribes everything. Say **"Friday"** naturally at any point (even mid-conversation with someone else) and FRIDAY activates with full context of what was just said.
 
 ```bash
 # Start with voice enabled
@@ -90,11 +90,27 @@ uv run friday --voice
 
 # Or toggle at runtime
 /voice
+
+# Pause/resume ambient listening
+/listening-off
+/listening-on
 ```
 
-Say **"Hey Jarvis"** to activate, speak your command, and FRIDAY responds through your speakers. CLI and voice work simultaneously — type or talk, your choice.
+After FRIDAY responds, you have a **15-second follow-up window** — just keep talking without saying "Friday" again. CLI and voice work simultaneously — type or talk, your choice.
 
-**Stack:** OpenWakeWord + Silero VAD + MLX Whisper + Kokoro-82M TTS. Zero cloud API calls.
+**STT (always local):** Silero VAD + MLX Whisper. Fast, reliable, no cloud dependency.
+
+**TTS (cloud or local — your choice):**
+```bash
+# Cloud TTS (ElevenLabs Flash v2.5, ~75ms latency) — add to .env:
+ELEVENLABS_API_KEY=your-key-here
+ELEVENLABS_VOICE_ID=JBFqnCBsd6RMkjVDRZzb   # Optional — defaults to "George"
+
+# Local TTS (Kokoro-82M ONNX, ~500ms) — just don't set the key above.
+# Remove ELEVENLABS_API_KEY from .env and FRIDAY uses Kokoro automatically.
+```
+
+To switch between cloud and local TTS: add or remove `ELEVENLABS_API_KEY` from `.env`. That's it.
 
 ### Getting a Tavily API Key
 
@@ -132,11 +148,11 @@ User Input (CLI / Voice)
       │
       ├─ 1.   Fast Path       → regex → instant            (0 LLM, <1s)
       ├─ 1.5  User Override   → @agent → agent dispatch    (0s routing)
-      ├─ 2.   Oneshot         → regex → tool + 1 LLM      (1 LLM, ~15s)
-      ├─ 2.5  Direct Dispatch → LLM picks tool + format    (2 LLM, ~25s)
-      ├─ 3.   Agent Dispatch  → regex → ReAct loop         (2-4 LLM, ~45s)
-      ├─ 4.   Fast Chat       → 1 LLM slim prompt          (1 LLM, ~12s)
-      └─ 5.   Full LLM Route  → fat prompt + dispatch      (4 LLM, ~60s)
+      ├─ 2.   Oneshot         → regex → tool + 1 LLM      (1 LLM, ~2s)
+      ├─ 2.5  Direct Dispatch → LLM picks tool + format    (2 LLM, ~3-5s)
+      ├─ 3.   Agent Dispatch  → regex → ReAct loop         (2-4 LLM, ~5-10s)
+      ├─ 4.   Fast Chat       → 1 LLM slim prompt          (1 LLM, ~1s)
+      └─ 5.   Full LLM Route  → fat prompt + dispatch      (4 LLM, ~8-15s)
       │
       ▼  (background thread — user keeps chatting)
       │
@@ -158,28 +174,17 @@ User Input (CLI / Voice)
 
 ### How Routing Works (7-tier, fastest first)
 
-1. **Fast Path** — regex pattern matching, zero LLM calls (<1s)
-   - Greetings ("hey", "you good", "man, hawfar") → instant canned response
-   - TV commands ("volume to 30", "put on Netflix") → direct tool call
-   - Screenshots, open app, battery, volume → instant
-2. **User Override** — `@agent` syntax bypasses all routing (0s)
-   - `@comms draft email to...` → comms_agent directly
-   - `@research quantum computing` → research_agent directly
-   - Also: `use comms`, `use research`, etc.
-3. **Oneshot** — regex → tool + 1 LLM format (~15s)
-   - "check my email" → `read_emails()` + format
-   - "whats on my calendar" → `get_calendar()` + format
-4. **Direct Tool Dispatch** — 1 LLM picks tool + 1 LLM format (~25s)
-   - Model gets 9 curated tools, picks the right one in 1 call
-   - Covers: email, calendar, X search, web search, memory
-   - Falls through to agent if multi-step needed
-5. **Agent Dispatch** — regex → agent ReAct loop (~45s)
-   - Multi-step tasks: draft+send email, browse+fill forms
-   - Agent's own summary used directly (no synthesis rewrite)
-6. **Fast Chat** — 1 LLM with slim prompt (~12s)
-   - Casual conversation, opinions, reactions
-7. **Full LLM Routing** — fallback for ambiguous queries (~60s)
-   - Model decides which agent, if any
+| Priority | Path | How | Speed |
+|----------|------|-----|-------|
+| 1 | **Fast Path** | Regex → instant canned response or tool call | <1s, 0 LLM |
+| 1.5 | **User Override** | `@agent` or `use agent` → direct dispatch | 0s routing |
+| 2 | **Oneshot** | Regex → tool + 1 LLM format | ~3-5s |
+| 2.5 | **Direct Dispatch** | LLM picks tool + 1 LLM format | ~3-5s |
+| 3 | **Agent Dispatch** | LLM classify (~1s) → agent ReAct loop, regex fallback | ~5-10s |
+| 4 | **Fast Chat** | 1 LLM with slim prompt | ~1s |
+| 5 | **Full LLM Route** | Fat prompt + dispatch (ambiguous only) | ~8-15s |
+
+**Priority 3 uses Groq LLM classification** (~1s) to pick the right agent, with regex as automatic fallback when offline. This replaced the old regex-only routing which couldn't handle ambiguous queries.
 
 **All agent work runs in background** — user keeps chatting. Live status updates stream to CLI/voice. Parallel tool execution via `asyncio.gather()`.
 
@@ -204,10 +209,15 @@ JARVIS/
 │   ├── core/
 │   │   ├── config.py          # Model, paths, settings (single source of truth)
 │   │   ├── types.py           # ToolResult, AgentResponse, ErrorCode, Severity
-│   │   ├── llm.py             # Ollama wrapper (chat, streaming, think control)
+│   │   ├── llm.py             # LLM abstraction (cloud via Groq + local Ollama fallback)
 │   │   ├── base_agent.py      # ReAct loop base class for all agents
 │   │   ├── tool_dispatch.py   # Direct tool dispatch — 1 LLM picks tool, 1 LLM formats
-│   │   └── orchestrator.py    # FRIDAY Core — 7-tier routing, dispatch, synthesis
+│   │   ├── prompts.py         # Personality, system prompt, dispatch tool schema
+│   │   ├── router.py          # Intent classification (LLM + regex), agent matching
+│   │   ├── fast_path.py       # Zero-LLM instant commands (TV, greetings)
+│   │   ├── oneshot.py         # Regex → tool → 1 LLM format
+│   │   ├── briefing.py        # Parallel tool calls → 1 LLM synthesis
+│   │   └── orchestrator.py    # FRIDAY Core — thin dispatcher, imports from above
 │   ├── agents/
 │   │   ├── code_agent.py      # File ops, terminal, git, debugging
 │   │   ├── research_agent.py  # Web search, page fetching, known sources
@@ -238,9 +248,15 @@ JARVIS/
 │   │   ├── briefing_tools.py  # Briefing queue, digest, alert delivery
 │   │   ├── cv_tools.py        # CV get/tailor, cover letters, PDF generation
 │   │   └── google_auth.py     # Shared OAuth2 for Gmail + Calendar
+│   ├── voice/
+│   │   ├── config.py          # Audio constants, VAD thresholds, trigger words, TTS config
+│   │   ├── pipeline.py        # Always-on ambient listener + trigger word + follow-up window
+│   │   ├── vad.py             # Silero VAD v6 wrapper (speech detection)
+│   │   ├── stt.py             # MLX Whisper local transcription
+│   │   └── tts.py             # ElevenLabs streaming (cloud) + Kokoro ONNX (local fallback)
 │   ├── memory/
 │   │   └── store.py           # Hybrid memory (semantic + structured)
-│   └── skills/                # (Phase 2 — knowledge docs for agents)
+│   └── skills/                # (Phase 5 — knowledge docs for agents)
 ├── Idea/                      # Design docs, system maps, tool specs
 ├── docs/
 │   └── progress.md            # Development log
@@ -573,6 +589,9 @@ Memory is injected into every system prompt so FRIDAY has context about you, you
 | `/quit` | Exit FRIDAY |
 | `/clear` | Reset conversation history |
 | `/memory` | Show recent stored memories |
+| `/voice` | Toggle voice pipeline on/off |
+| `/listening-off` | Pause ambient listening |
+| `/listening-on` | Resume ambient listening |
 
 ---
 
@@ -602,8 +621,8 @@ FRIDAY isn't generic. It's built for Travis — a Ghanaian founder based in Plym
 
 | Component | Technology | Why |
 |-----------|-----------|-----|
-| **LLM (primary)** | Qwen3.5-9B via Ollama | 9B params, fast on Apple Silicon, thinking toggle, Apache 2.0 |
-| **LLM (fast)** | Qwen3-4B via Ollama | 4B params, lightweight tasks, dual-model architecture |
+| **LLM (cloud)** | Qwen3-32B via Groq | 32B params, sub-100ms latency, 535 tok/s, OpenAI-compatible API |
+| **LLM (local)** | Qwen3.5-9B via Ollama | 9B params, fully offline fallback, thinking toggle, Apache 2.0 |
 | **Package Manager** | uv | 10-100x faster than pip |
 | **Web Search** | Tavily | Built for AI agents, returns structured data, AI answers |
 | **Vector DB** | ChromaDB | Lightweight, embedded, cosine similarity |
@@ -618,10 +637,10 @@ FRIDAY isn't generic. It's built for Travis — a Ghanaian founder based in Plym
 | **PDF Generation** | WeasyPrint + Jinja2 | CV and cover letter PDF rendering, clean A4 layout |
 | **PDF Processing** | pypdf + pdfplumber | Read, merge, split, rotate, encrypt, extract text/tables |
 | **Social Media** | tweepy (X API v2) | Post, search, mentions, engage — pay-as-you-go credits |
-| **Wake Word** | OpenWakeWord (ONNX) | MIT, runs on CPU, "hey_jarvis" model |
 | **Voice Activity** | Silero VAD v6 | <1ms/chunk, enterprise-grade end-of-speech detection |
-| **Speech-to-Text** | MLX Whisper (whisper-small) | 10x faster than whisper.cpp on Apple Silicon |
-| **Text-to-Speech** | Kokoro-82M (ONNX) | 82M params, natural voice, Apache 2.0, ~500ms synthesis |
+| **Speech-to-Text** | MLX Whisper (whisper-small) | 10x faster than whisper.cpp on Apple Silicon, always local |
+| **Text-to-Speech (cloud)** | ElevenLabs Flash v2.5 | ~75ms streaming latency, PCM 24kHz, persistent connections |
+| **Text-to-Speech (local)** | Kokoro-82M (ONNX) | 82M params, natural voice, Apache 2.0, ~500ms synthesis |
 | **Audio I/O** | python-sounddevice | Callback-based, clean macOS support |
 
 ---
@@ -653,7 +672,7 @@ FRIDAY isn't generic. It's built for Travis — a Ghanaian founder based in Plym
 - [x] Compacted tool results for 9B model compatibility
 
 ### Phase 2 — Voice Pipeline (Complete)
-- [x] Voice pipeline — OpenWakeWord + Silero VAD + MLX Whisper + Kokoro TTS
+- [x] Voice pipeline — Silero VAD + MLX Whisper + Kokoro TTS
 - [x] `--voice` flag and `/voice` runtime toggle
 - [x] Response filter (strips code/markdown for speech, condenses to 3 sentences)
 - [x] Activation chime, barge-in support, feedback prevention
@@ -679,14 +698,39 @@ FRIDAY isn't generic. It's built for Travis — a Ghanaian founder based in Plym
 - [x] Fast chat tier — slim prompt, truncated context, 10-15s conversational responses
 - [x] TTFT as primary UX metric — median 3.7s, 69% responsive (<6s)
 
-### Phase 4 — Intelligence
+### Phase 3.6 — Cloud Inference (Complete)
+- [x] Cloud LLM via Groq API (Qwen3-32B, sub-100ms latency, 535 tok/s)
+- [x] All LLM paths routed through `cloud_chat()` — tool dispatch, agents, formatting, chat
+- [x] Automatic fallback to local Ollama when cloud unavailable or API key unset
+- [x] Thinking block filtering (`<think>...</think>`) for Qwen reasoning models
+- [x] Stream format bridging — Ollama and OpenAI chunk formats unified via `extract_stream_content()`
+- [x] Average response time: **54s → 6.5s** (8x improvement)
+
+### Phase 3.7 — Orchestrator Split + LLM Routing (Complete)
+- [x] Split 1955-line orchestrator into 6 focused modules (prompts, router, fast_path, oneshot, briefing, orchestrator)
+- [x] LLM-based intent classification via Groq (~1s) with regex fallback for offline use
+- [x] Research agent benchmarks: **45-90s → 4-6s** (12x improvement)
+- [x] Clean cloud/local auto-switch: no API key = fully local, with key = cloud
+
+### Phase 4 — Voice Pipeline v2: Always-On Ambient Listening (Complete)
+- [x] Always-on ambient listening — mic stays open, all speech transcribed continuously
+- [x] Trigger word activation — say "Friday" naturally mid-conversation, no wake word needed
+- [x] Rolling transcript buffer — 5 minutes of ambient context, injected when triggered
+- [x] Follow-up window — 15 seconds after response, any speech treated as directed at FRIDAY
+- [x] Cloud TTS — ElevenLabs Flash v2.5 streaming (~75ms), Kokoro local fallback
+- [x] Noise/hallucination filtering — parenthetical descriptions, music, TV all filtered out
+- [x] VAD tuning — threshold 0.7 filters background music, 400ms min speech
+- [x] `/listening-off` and `/listening-on` CLI commands
+- [x] Cloud vs local TTS — set/remove `ELEVENLABS_API_KEY` in `.env` to switch
+
+### Phase 5 — Intelligence
 - [ ] Skill system (knowledge docs agents read before executing)
 - [ ] Fine-tuning data collection from sessions
-- [ ] QLoRA fine-tune on Qwen3.5-9B (personality + routing baked into weights)
+- [ ] QLoRA fine-tune on smaller model (personality + routing baked into weights)
 - [ ] Additional agents (Git, Deploy, Database)
-- [ ] Modal fallback for burst GPU capacity
+- [ ] Self-hosted inference on Modal/RunPod (for privacy or custom fine-tuned models)
 
-### Phase 5 — Ecosystem
+### Phase 6 — Ecosystem
 - [ ] Redis async messaging between agents
 - [ ] MCP server integration
 - [ ] Screenpipe integration (screen context awareness)
@@ -696,21 +740,117 @@ FRIDAY isn't generic. It's built for Travis — a Ghanaian founder based in Plym
 
 ---
 
+## Cloud Inference
+
+FRIDAY uses **Groq** for cloud inference — an OpenAI-compatible API running Qwen3-32B at 535 tokens/second with sub-100ms latency. This is what makes FRIDAY feel instant.
+
+### Why Cloud?
+
+Running Qwen3.5-9B locally on an M4 MacBook Air gave us 54s average response time. The M4 Air is fanless — under sustained LLM load, the GPU thermally throttles 2-15x. A 2-call search query took 25-45s. Agent tasks took 45-90s. Cloud inference brought the average down to **6.5s** — an 8x improvement.
+
+### Why Groq?
+
+We tested 4 models across 3 providers:
+
+| Model | Avg Time | Tool Accuracy | Issues |
+|-------|----------|--------------|--------|
+| Llama 3.3 70B (Groq) | 8.2s | 60% | Malformed tool calls, string-typed args, fake tool names |
+| Llama 3.1 8B (Groq) | 4.8s | 85% | Fast but wrong answers, hallucinated specs |
+| Kimi K2 (Groq) | 12.1s | 70% | Slow on follow-ups, 35-48s for some queries |
+| **Qwen3-32B (Groq)** | **6.5s** | **100%** | Zero tool call failures, best personality match |
+
+Qwen3-32B won on every metric: zero tool failures, accurate search results, proper Ghanaian personality, and fast enough to feel responsive.
+
+### How It Works
+
+All LLM calls go through `cloud_chat()` in `friday/core/llm.py`. If Groq is available, it uses the cloud. If not, it silently falls back to local Ollama. No code changes needed to switch.
+
+```
+cloud_chat()
+  ├─ Groq API available? → use cloud (sub-second per call)
+  └─ No API key or network down? → fall back to local Ollama (10-25s per call)
+```
+
+### Before vs After
+
+| Query Type | Local Ollama (M4 Air) | With Groq | Speedup |
+|-----------|----------------------|-----------|---------|
+| Greetings, TV commands | <1s | <1s | Same (no LLM) |
+| Search query (oneshot) | 25-45s | 3-5s | ~8x |
+| Research agent (2 LLM + Tavily) | 45-90s | **4-6s** | ~12x |
+| Agent task (ReAct loop) | 45-90s | 5-10s | ~9x |
+| Intent classification | 10-25s (regex only) | **~1s** (LLM) | ~15x |
+| Casual chat | 10-25s | 0.5-2s | ~10x |
+| **Average** | **~54s** | **~5s** | **~10x** |
+
+## Cloud vs Local — Your Choice
+
+FRIDAY auto-detects what's available. No config flags, no code changes — just environment variables.
+
+### Option A: Cloud (Groq) — Fast, recommended
+
+```bash
+# Add your free Groq API key to .env
+echo 'GROQ_API_KEY=gsk_your_key_here' >> .env
+
+# Get a key at https://console.groq.com (free tier available)
+```
+
+All LLM calls go through Groq (~1s each). LLM-based intent classification is enabled. If Groq goes down mid-session, FRIDAY silently falls back to local Ollama.
+
+### Option B: Fully Local — Private, no cloud
+
+```bash
+# Just don't set GROQ_API_KEY (or remove it from .env)
+# Make sure Ollama is running:
+ollama pull qwen3.5:9b
+ollama serve
+
+# Run FRIDAY as normal
+uv run friday
+```
+
+All LLM calls go through local Ollama (~10-25s each on M4 Air). Intent classification uses regex instead of LLM. 100% private, zero data leaves your machine.
+
+### How it works under the hood
+
+```
+GROQ_API_KEY set?
+  ├─ Yes → cloud_chat() uses Groq API (~1s per call)
+  │        classify_intent() uses LLM for smart agent routing
+  │        Auto-fallback to Ollama if Groq is unreachable
+  │
+  └─ No  → cloud_chat() routes to local Ollama (~10-25s per call)
+           classify_intent() skips, regex handles all routing
+           Zero cloud calls, fully offline capable
+```
+
+To switch between modes: add or remove `GROQ_API_KEY` from `.env` and restart FRIDAY. That's it.
+
+---
+
 ## Configuration
 
 All config lives in `friday/core/config.py`:
 
 ```python
-MODEL_NAME = "qwen3.5:9b"           # Primary model (tool dispatch + formatting)
-MODEL_NAME_FAST = "qwen3:4b"       # Fast model (lightweight tasks)
+# Cloud LLM (Groq — default, fastest)
+CLOUD_API_KEY = os.getenv("GROQ_API_KEY", "")
+CLOUD_BASE_URL = os.getenv("CLOUD_BASE_URL", "https://api.groq.com/openai/v1")
+CLOUD_MODEL_NAME = os.getenv("CLOUD_MODEL", "qwen/qwen3-32b")
+USE_CLOUD = bool(CLOUD_API_KEY)       # Auto-enable if key present
+
+# Local Ollama (fallback)
+MODEL_NAME = "qwen3.5:9b"            # Local model (used when cloud unavailable)
 OLLAMA_BASE_URL = "http://localhost:11434"
-SQLITE_DB_PATH = MEMORY_DIR / "friday.db"
-CHROMA_PERSIST_DIR = str(MEMORY_DIR / "chroma")
 ```
 
 Environment variables (`.env`):
 ```
 TAVILY_API_KEY=your-key-here
+GROQ_API_KEY=gsk_...                 # Optional — enables cloud LLM inference
+ELEVENLABS_API_KEY=...               # Optional — enables cloud TTS (local Kokoro fallback)
+ELEVENLABS_VOICE_ID=JBFqnCBsd6RMkjVDRZzb  # Optional — defaults to "George"
 ```
 
 Google credentials (managed by `google_auth.py`):
@@ -723,7 +863,7 @@ Google credentials (managed by `google_auth.py`):
 
 ## Design Philosophy
 
-1. **Local first** — inference runs on your machine. No API calls for the core LLM.
+1. **Speed first, local always available** — cloud inference via Groq for sub-second LLM calls. Automatic fallback to local Ollama when offline. Remove the API key and everything runs on your machine.
 2. **Agents are specialists** — each agent gets focused context and tools. No god-agent.
 3. **Memory is identity** — FRIDAY remembers you. That's what makes it personal.
 4. **Speed over perfection** — streaming, think control, fast routing. Latency kills the vibe.
@@ -731,10 +871,96 @@ Google credentials (managed by `google_auth.py`):
 
 ---
 
-## License
+## Setting Up Ollama (Local LLM)
 
-Apache 2.0
+Ollama runs LLMs locally on your Mac. FRIDAY uses it as the local inference backend (and as fallback when cloud is unavailable).
+
+### Install Ollama
+
+```bash
+# Download from https://ollama.com or use Homebrew:
+brew install ollama
+```
+
+This installs the `ollama` CLI and the Ollama app. On first launch, it sets up the local server at `http://localhost:11434`.
+
+### Pull the Model
+
+```bash
+# Pull the model FRIDAY uses (Qwen 3.5 9B, ~6GB download)
+ollama pull qwen3.5:9b
+```
+
+This downloads the quantized model to `~/.ollama/models/`. It only downloads once — subsequent runs use the cached model.
+
+### Start the Server
+
+```bash
+# Option 1: Launch the Ollama app (from Applications or Spotlight)
+# The app runs the server in the background with a menu bar icon.
+
+# Option 2: Start from terminal
+ollama serve
+```
+
+The server must be running for FRIDAY to use local inference. If you're using cloud (Groq), the server is only needed as a fallback.
+
+### Verify It Works
+
+```bash
+# Quick test — should respond in a few seconds
+ollama run qwen3.5:9b "hello"
+
+# Check the server is running
+curl http://localhost:11434/api/tags
+```
+
+### Hardware Requirements
+
+| Mac | RAM | Performance |
+|-----|-----|------------|
+| M1/M2/M3/M4 (any) | 16GB+ | Works well, 10-25s per call |
+| M1/M2/M3/M4 Pro/Max | 32GB+ | Faster, can run larger models |
+| Intel Mac | 16GB+ | Works but slower (CPU only) |
+
+The model uses ~6GB of RAM. Ollama keeps it loaded in memory (`keep_alive: -1`) so subsequent calls are faster — no reload time.
+
+### Troubleshooting
+
+- **"connection refused"** — Ollama server isn't running. Launch the app or run `ollama serve`.
+- **"model not found"** — Run `ollama pull qwen3.5:9b` to download it.
+- **Slow responses** — Normal on fanless Macs (M4 Air). GPU throttles under sustained load. Use cloud (Groq) for speed.
+- **Out of memory** — Close other heavy apps. The 9B model needs ~6GB free RAM.
 
 ---
 
-*Built at 2am in Plymouth, UK.*
+## Groq Pricing
+
+FRIDAY uses Groq's cloud API for fast inference. Current pricing for the model we use:
+
+| | Qwen3-32B on Groq |
+|---|---|
+| **Input** | $0.29 / million tokens |
+| **Output** | $0.59 / million tokens |
+| **Speed** | 662 tokens/sec |
+| **Free tier** | Yes — free credits on signup |
+
+**What does this cost in practice?** A typical FRIDAY query uses ~500 input tokens and ~200 output tokens. That's ~$0.0003 per query. **$1 covers ~3,000 queries.** The free tier is more than enough for personal use.
+
+Sign up at [console.groq.com](https://console.groq.com) — no credit card required for the free tier.
+
+---
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE) for full text.
+
+**Attribution:** If you use FRIDAY in your project, product, or research, please credit the original author:
+
+> Built on FRIDAY by Travis Moore (Angelo Asante)
+
+See [NOTICE](NOTICE) for full attribution requirements.
+
+---
+
+*Built at 2am in Plymouth, UK. By Travis Moore.*

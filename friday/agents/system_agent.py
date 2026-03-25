@@ -107,7 +107,7 @@ class SystemAgent(BaseAgent):
         }
         super().__init__()
 
-    async def run(self, task: str, context: str = "", on_tool_call=None):
+    async def run(self, task: str, context: str = "", on_tool_call=None, on_chunk=None):
         # Dynamically add browser tools if the task mentions browser/web/navigate
         task_lower = task.lower()
         browser_keywords = ["browser", "navigate", "webpage", "website", "click", "fill form",
@@ -131,7 +131,7 @@ class SystemAgent(BaseAgent):
             self.tools.update(PDF_TOOLS)
             self._build_tool_definitions()
 
-        result = await super().run(task=task, context=context, on_tool_call=on_tool_call)
+        result = await super().run(task=task, context=context, on_tool_call=on_tool_call, on_chunk=on_chunk)
 
         # Reset tools to defaults after run
         self.__init__()

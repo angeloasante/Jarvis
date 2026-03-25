@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Optional, Callable
 
 from friday.core.base_agent import BaseAgent
-from friday.core.llm import chat, extract_tool_calls, extract_text
+from friday.core.llm import cloud_chat, extract_tool_calls, extract_text, extract_stream_content
 from friday.core.types import AgentResponse, ToolResult
 from friday.tools.web_tools import TOOL_SCHEMAS as WEB_TOOLS
 from friday.tools.memory_tools import TOOL_SCHEMAS as MEMORY_TOOLS
@@ -42,10 +42,12 @@ Rules:
 Current time: {time}"""
 
 ANSWER_PROMPT = """You are FRIDAY. Travis's AI. Built by him. Running on his machine.
-Travis: Ghanaian founder, Plymouth UK, self-taught, builds at 2-4am.
-Voice: brilliant friend who's also an engineer. Witty, short, real. Never corporate.
+Travis: Ghanaian founder based in Plymouth UK.
+Voice: brilliant friend who's also an engineer. Real, not corporate.
 
-Answer the question using ONLY the research data below. Be direct. 2-4 sentences max.
+Answer the question using ONLY the research data below.
+Match depth to the question: simple question = concise answer. Detailed/technical question = thorough answer with key facts, numbers, and context.
+NEVER deflect with "let's go build" or "let's code" — just answer the question properly.
 If data is insufficient, say what's missing."""
 
 
@@ -62,7 +64,7 @@ class ResearchAgent(BaseAgent):
         }
         super().__init__()
 
-    async def run(self, task: str, context: str = "", on_tool_call: Optional[Callable] = None) -> AgentResponse:
+    async def run(self, task: str, context: str = "", on_tool_call: Optional[Callable] = None, on_chunk: Optional[Callable] = None) -> AgentResponse:
         """2 LLM calls: 1 picks tools + execute all, 1 formats answer."""
         import time
         t0 = time.time()
@@ -90,7 +92,7 @@ class ResearchAgent(BaseAgent):
             messages.append({"role": "system", "content": f"Recent conversation:\n{context[:500]}"})
         messages.append({"role": "user", "content": task_with_hints})
 
-        response = chat(messages=messages, tools=tool_schemas, think=False)
+        response = cloud_chat(messages=messages, tools=tool_schemas)
         tool_calls = extract_tool_calls(response)
 
         if not tool_calls:
@@ -136,8 +138,19 @@ class ResearchAgent(BaseAgent):
             {"role": "system", "content": f"Research data:\n{research_data}"},
         ]
 
-        answer_response = chat(messages=answer_messages, think=False, max_tokens=200)
-        answer = extract_text(answer_response)
+        if on_chunk:
+            # Stream answer token by token
+            response_stream = cloud_chat(messages=answer_messages, stream=True, max_tokens=400)
+            answer_parts = []
+            for chunk in response_stream:
+                content = extract_stream_content(chunk)
+                if content:
+                    on_chunk(content)
+                    answer_parts.append(content)
+            answer = "".join(answer_parts)
+        else:
+            answer_response = cloud_chat(messages=answer_messages, max_tokens=400)
+            answer = extract_text(answer_response)
 
         duration = int((time.time() - t0) * 1000)
         return AgentResponse(

@@ -205,6 +205,22 @@ async def main():
                     console.print(f"  [red]✗ Voice failed: {e}[/red]\n")
             continue
 
+        if user_input == "/listening-off":
+            if voice_pipeline:
+                voice_pipeline.set_listening(False)
+                console.print("  [dim green]:: Listening paused — FRIDAY won't hear ambient audio[/dim green]\n")
+            else:
+                console.print("  [dim]:: Voice pipeline not running. Start with /voice[/dim]\n")
+            continue
+
+        if user_input == "/listening-on":
+            if voice_pipeline:
+                voice_pipeline.set_listening(True)
+                console.print("  [bold green]:: Listening resumed — say \"Friday\" at any time[/bold green]\n")
+            else:
+                console.print("  [dim]:: Voice pipeline not running. Start with /voice[/dim]\n")
+            continue
+
         try:
             # Fast path — direct tool calls, zero LLM (TV, volume, etc.)
             t0 = time.monotonic()

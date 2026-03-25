@@ -1,7 +1,15 @@
-"""FRIDAY Voice Pipeline — always-on, fully local.
+"""FRIDAY Voice Pipeline — always-on ambient listening.
 
-Wake word → VAD → STT → FridayCore → streaming TTS
-Runs in a dedicated thread alongside the CLI.
+Mic is always open. Every speech segment gets transcribed and added to a
+rolling context buffer. When "Friday" is detected in the transcript, FRIDAY
+activates with full conversation context — you can be mid-conversation with
+a friend and just say "Friday, what do you think?" and it has the full context.
+
+Two modes (auto-selected):
+  Cloud:  Mic → ElevenLabs WebSocket (Scribe Realtime, ~150ms) → transcripts
+  Local:  Mic → Silero VAD → MLX Whisper → transcripts
+
+Toggle: /listening-off to pause, /listening-on to resume.
 """
 
 import asyncio
@@ -22,19 +30,21 @@ from friday.voice.config import (
     CHIME_DURATION,
     CHIME_VOLUME,
     MAX_VOICE_SENTENCES,
+    TRANSCRIPT_BUFFER_SECONDS,
+    TRIGGER_WORDS,
 )
-from friday.voice.wake_word import WakeWordDetector
-from friday.voice.vad import VoiceActivityDetector
-from friday.voice.stt import Transcriber
 from friday.voice.tts import Speaker
 
 console = Console()
 
-# Sentinel to signal end of stream
 _DONE = object()
-
-# Regex to detect sentence boundaries
 SENTENCE_END_RE = re.compile(r"[.!?]\s")
+
+# Build trigger regex — matches "friday" (or custom words) at word boundary
+_TRIGGER_RE = re.compile(
+    r"\b(" + "|".join(re.escape(w) for w in TRIGGER_WORDS) + r")\b",
+    re.IGNORECASE,
+)
 
 
 def _play_chime():
@@ -61,19 +71,104 @@ def _strip_for_voice(text: str) -> str:
     return text.strip()
 
 
+# ── Transcript entry ─────────────────────────────────────────────────────────
+
+class _Segment:
+    __slots__ = ("text", "timestamp")
+
+    def __init__(self, text: str, timestamp: float):
+        self.text = text
+        self.timestamp = timestamp
+
+
+# ── Noise / hallucination filter ──────────────────────────────────────────────
+
+_HALLUCINATIONS = {
+    "thank you", "thanks for watching", "thank you for watching",
+    "subscribe", "like and subscribe", "you", "bye",
+    "the end", "thanks", "thank you very much",
+    "", "...", "hmm", "um", "uh",
+}
+
+# Noise description words ElevenLabs Scribe produces for non-speech audio
+_NOISE_WORDS = {
+    "music", "applause", "laughter", "silence", "inaudible",
+    "noise", "static", "beep", "ring", "buzz", "clicking",
+    "crowd", "cheering", "screaming", "sighing", "coughing",
+    "engine", "typing", "breathing", "whistling",
+}
+
+
+def _is_noise_or_hallucination(text: str) -> bool:
+    """Filter out non-speech transcripts: hallucinations, sound descriptions, noise."""
+    t = text.strip()
+    tl = t.lower().rstrip(".")
+
+    # Too short to be real speech
+    if len(tl) < 4:
+        return True
+
+    # Exact hallucination match
+    if tl in _HALLUCINATIONS:
+        return True
+
+    # Parenthetical sound descriptions: (engine revving), (screaming), (dramatic music)
+    if re.match(r"^\(.*\)$", t):
+        return True
+
+    # Broken parentheticals: "Music)", "(crowd", "screaming)"
+    if (t.endswith(")") and "(" not in t) or (t.startswith("(") and ")" not in t):
+        return True
+
+    # Single noise word with optional parens: "Music", "(applause)"
+    cleaned = tl.strip("(). ")
+    if cleaned in _NOISE_WORDS:
+        return True
+
+    # Two-word noise descriptions: "engine revving", "crowd cheering"
+    words = cleaned.split()
+    if len(words) == 2 and words[0] in _NOISE_WORDS:
+        return True
+    if len(words) == 2 and words[1] in _NOISE_WORDS:
+        return True
+
+    return False
+
+
+# ── Pipeline ─────────────────────────────────────────────────────────────────
+
 class VoicePipeline:
-    """Manages the full voice loop in a background thread."""
+    """Always-on ambient listener with trigger-word activation.
+
+    The mic stays open. Speech segments are transcribed continuously.
+    When "Friday" is detected, FRIDAY responds with full awareness
+    of the ambient conversation.
+    """
 
     def __init__(self, friday, main_loop: asyncio.AbstractEventLoop):
         self.friday = friday
         self.main_loop = main_loop
         self._thread = None
         self._running = False
+        self._listening = True  # /listening-off toggles this
 
-        self._wake: WakeWordDetector | None = None
-        self._vad: VoiceActivityDetector | None = None
-        self._stt: Transcriber | None = None
         self._tts: Speaker | None = None
+        self._vad = None
+        self._stt = None
+
+        # Rolling transcript — pruned to last N seconds
+        self._transcript: list[_Segment] = []
+        self._transcript_lock = threading.Lock()
+
+        # Pause transcription during TTS to prevent feedback
+        self._muted = False
+
+        # Follow-up window — after FRIDAY responds, treat next speech as directed
+        # at FRIDAY for N seconds without needing trigger word again
+        self._last_response_time: float = 0.0
+        self._followup_window_s: float = 15.0
+
+    # ── Public controls ──────────────────────────────────────────────────
 
     def start(self):
         if self._running:
@@ -87,25 +182,44 @@ class VoicePipeline:
         if self._tts:
             self._tts.stop()
 
+    def set_listening(self, on: bool):
+        """Toggle ambient listening on/off."""
+        self._listening = on
+
+    def get_transcript(self, last_seconds: float | None = None) -> str:
+        """Get the rolling transcript as a single string."""
+        with self._transcript_lock:
+            if last_seconds is None:
+                segments = list(self._transcript)
+            else:
+                cutoff = time.time() - last_seconds
+                segments = [s for s in self._transcript if s.timestamp >= cutoff]
+        return "\n".join(s.text for s in segments)
+
+    # ── Init ─────────────────────────────────────────────────────────────
+
     def _init_components(self):
         console.print("  [dim green]:: Loading voice models...[/dim green]")
 
-        self._wake = WakeWordDetector()
-        console.print("  [dim green]   ✓ Wake word ready[/dim green]")
+        self._tts = Speaker()
+        from friday.core.config import USE_CLOUD_TTS
+        tts_label = "ElevenLabs" if USE_CLOUD_TTS else "Kokoro (local)"
+        console.print(f"  [dim green]   ✓ TTS: {tts_label}[/dim green]")
 
+        # Always use local STT — fast, reliable, no cloud dependency
+        from friday.voice.vad import VoiceActivityDetector
+        from friday.voice.stt import Transcriber
         self._vad = VoiceActivityDetector()
-        console.print("  [dim green]   ✓ VAD ready[/dim green]")
-
+        console.print("  [dim green]   ✓ VAD ready (Silero)[/dim green]")
         self._stt = Transcriber()
         self._stt.warmup()
-        console.print("  [dim green]   ✓ STT ready[/dim green]")
+        console.print("  [dim green]   ✓ STT ready (MLX Whisper)[/dim green]")
 
-        self._tts = Speaker()
-        console.print("  [dim green]   ✓ TTS ready[/dim green]")
-
-        from friday.voice.config import WAKE_WORD_DISPLAY
-        console.print(f"  [bold green]:: Voice pipeline ACTIVE — say '{WAKE_WORD_DISPLAY}'[/bold green]")
+        console.print(f"  [bold green]:: Voice pipeline ACTIVE — always listening[/bold green]")
+        console.print(f"  [dim]   Say \"Friday\" at any time to activate[/dim]")
         console.print()
+
+    # ── Main loop ────────────────────────────────────────────────────────
 
     def _run(self):
         try:
@@ -117,63 +231,139 @@ class VoicePipeline:
 
         while self._running:
             try:
-                self._listen_loop()
+                self._ambient_loop_local()
             except Exception as e:
                 if self._running:
                     console.print(f"  [red]✗ Voice error: {e}[/red]")
                     time.sleep(1)
 
-    def _listen_loop(self):
-        """Listen for wake word, record speech, process with streaming TTS."""
-        # Phase 1: Listen for wake word
-        with sd.InputStream(
-            samplerate=SAMPLE_RATE, channels=CHANNELS,
-            dtype="int16", blocksize=FRAME_SIZE,
-        ) as stream:
-            while self._running:
-                chunk, _ = stream.read(FRAME_SIZE)
-                audio = chunk[:, 0] if chunk.ndim > 1 else chunk
-                if self._wake.detect(audio):
-                    break
-            else:
-                return
-
-        # Phase 2: Activation chime
-        _play_chime()
-
-        # Phase 3: Record speech until silence
-        self._vad.reset()
-        audio_buffer = []
-
-        with sd.InputStream(
-            samplerate=SAMPLE_RATE, channels=CHANNELS,
-            dtype="int16", blocksize=FRAME_SIZE,
-        ) as stream:
-            while self._running:
-                chunk, _ = stream.read(FRAME_SIZE)
-                audio = chunk[:, 0] if chunk.ndim > 1 else chunk
-                audio_buffer.append(audio.copy())
-                if self._vad.feed(audio) == "end":
-                    break
-
-        if not audio_buffer:
-            return
-
-        # Phase 4: Transcribe
-        full_audio = np.concatenate(audio_buffer)
-        text = self._stt.transcribe(full_audio)
-
+    def _handle_committed_text(self, text: str):
+        """Process a finalized transcript (from cloud or local)."""
         if not text or len(text.strip()) < 2:
             return
 
-        console.print(f"\n  [bold cyan]🎤 Travis:[/bold cyan] [cyan]{text}[/cyan]")
+        text = text.strip()
+        if _is_noise_or_hallucination(text):
+            return
 
-        # Phase 5+6: Fast path or streamed response → TTS
-        self._wake.disable()
+        now = time.time()
+
+        # Add to rolling transcript
+        with self._transcript_lock:
+            self._transcript.append(_Segment(text=text, timestamp=now))
+            cutoff = now - TRANSCRIPT_BUFFER_SECONDS
+            self._transcript = [s for s in self._transcript if s.timestamp >= cutoff]
+
+        # Show committed transcript
+        console.print(f"\r  [dim]  ◦ {text}[/dim]    ")
+
+        # Check for trigger word OR follow-up window
+        trigger_match = _TRIGGER_RE.search(text)
+        if trigger_match:
+            self._on_triggered(text, trigger_match)
+        elif (self._last_response_time
+              and (now - self._last_response_time) < self._followup_window_s):
+            # Within follow-up window — treat as directed at FRIDAY
+            self._on_followup(text)
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  LOCAL MODE — Silero VAD + MLX Whisper (fallback)
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _ambient_loop_local(self):
+        """Local mode: VAD detects speech, Whisper transcribes."""
+        self._vad.reset()
+        audio_buffer = []
+        has_speech = False
+
+        with sd.InputStream(
+            samplerate=SAMPLE_RATE, channels=CHANNELS,
+            dtype="int16", blocksize=FRAME_SIZE,
+        ) as stream:
+            while self._running:
+                if not self._listening or self._muted:
+                    time.sleep(0.1)
+                    continue
+
+                chunk, _ = stream.read(FRAME_SIZE)
+                audio = chunk[:, 0] if chunk.ndim > 1 else chunk
+
+                state = self._vad.feed(audio)
+
+                if state == "speech":
+                    audio_buffer.append(audio.copy())
+                    has_speech = True
+                elif state == "silence" and has_speech:
+                    audio_buffer.append(audio.copy())
+                elif state == "end" and has_speech:
+                    self._transcribe_local_segment(audio_buffer)
+                    audio_buffer = []
+                    has_speech = False
+                    self._vad.reset()
+
+    def _transcribe_local_segment(self, audio_buffer: list[np.ndarray]):
+        """Transcribe a local audio segment with MLX Whisper."""
+        if not audio_buffer:
+            return
+
+        full_audio = np.concatenate(audio_buffer)
+        duration_s = len(full_audio) / SAMPLE_RATE
+        if duration_s < 0.5:
+            return
+
+        text = self._stt.transcribe(full_audio)
+        self._handle_committed_text(text)
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  TRIGGER — "Friday" detected in transcript
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _on_triggered(self, trigger_text: str, match: re.Match):
+        """FRIDAY was addressed — extract query, build context, respond."""
+        after_trigger = trigger_text[match.end():].strip()
+        before_trigger = trigger_text[:match.start()].strip()
+
+        # Strip trailing filler: "friday, you dig?" → "you dig?"
+        query = after_trigger if after_trigger else before_trigger
+
+        if not query or len(query) < 2:
+            _play_chime()
+            console.print(f"\n  [bold cyan]🎤 Travis:[/bold cyan] [cyan]{trigger_text}[/cyan]")
+            self._tts.speak("Yeah?")
+            self._last_response_time = time.time()
+            return
+
+        # Build ambient context from rolling transcript
+        ambient_context = self._build_ambient_context()
+
+        console.print(f"\n  [bold cyan]🎤 Travis:[/bold cyan] [cyan]{trigger_text}[/cyan]")
+        _play_chime()
+
+        self._respond(query, ambient_context)
+
+    def _on_followup(self, text: str):
+        """Speech within follow-up window — treat as directed at FRIDAY."""
+        console.print(f"\n  [bold cyan]🎤 Travis:[/bold cyan] [cyan]{text}[/cyan]")
+        _play_chime()
+        self._respond(text)
+
+    def _respond(self, query: str, ambient_context: str = ""):
+        """Send query to FRIDAY and speak the response."""
+        # Mute mic during response
+        self._muted = True
         try:
-            # Try fast path first (TV commands, etc.) — zero LLM, sub-second
+            contextualized_query = query
+            if ambient_context:
+                contextualized_query = (
+                    f"[Ambient conversation context — Travis was talking and then addressed you:\n"
+                    f"{ambient_context}\n"
+                    f"---\n"
+                    f"Travis said to you: {query}]"
+                )
+
+            # Try fast path first
             fast_result = asyncio.run_coroutine_threadsafe(
-                self.friday.fast_path(text), self.main_loop
+                self.friday.fast_path(query), self.main_loop
             ).result(timeout=15)
 
             if fast_result is not None:
@@ -181,26 +371,40 @@ class VoicePipeline:
                 console.print()
                 self._tts.speak(fast_result)
             else:
-                self._process_and_speak(text)
+                self._process_and_speak(contextualized_query)
         finally:
-            self._wake.enable()
+            self._muted = False
+            self._last_response_time = time.time()
 
-    # ── Streaming TTS: speak sentence-by-sentence as LLM generates ──
+    def _build_ambient_context(self) -> str:
+        """Build recent conversation context (last 2 min, max 10 segments)."""
+        with self._transcript_lock:
+            cutoff = time.time() - 120
+            recent = [s for s in self._transcript if s.timestamp >= cutoff]
+
+        if not recent or len(recent) <= 1:
+            return ""
+
+        # Exclude the triggering segment (last one)
+        context_segments = recent[:-1]
+        if not context_segments:
+            return ""
+
+        return "\n".join(s.text for s in context_segments[-10:])
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  STREAMING TTS RESPONSE
+    # ══════════════════════════════════════════════════════════════════════
 
     def _process_and_speak(self, text: str):
-        """All queries go through dispatch_background for consistent routing.
-
-        Chunks flow through a thread-safe queue to the voice thread
-        which speaks them sentence-by-sentence.
-        """
+        """Dispatch to FridayCore and speak response sentence-by-sentence."""
         chunk_queue: queue.Queue = queue.Queue()
 
         def _on_update(msg: str):
             if msg.startswith("ACK:"):
                 console.print(f"  [dim green]◈ working on it...[/dim green]")
             elif msg.startswith("STATUS:"):
-                status_text = msg[7:]
-                console.print(f"  [dim green]  ◈ {status_text}[/dim green]")
+                console.print(f"  [dim green]  ◈ {msg[7:]}[/dim green]")
             elif msg.startswith("CHUNK:"):
                 chunk_queue.put(msg[6:])
             elif msg.startswith("DONE:"):
@@ -211,7 +415,6 @@ class VoicePipeline:
 
         self.friday.dispatch_background(text, on_update=_on_update)
 
-        # Consumer: voice thread pulls chunks, buffers sentences, speaks
         sentence_buffer = ""
         sentences_spoken = 0
         full_chunks: list[str] = []
@@ -233,7 +436,6 @@ class VoicePipeline:
             full_chunks.append(item)
             sentence_buffer += item
 
-            # Check for sentence boundaries
             while SENTENCE_END_RE.search(sentence_buffer):
                 match = SENTENCE_END_RE.search(sentence_buffer)
                 sentence = sentence_buffer[:match.end()].strip()
@@ -243,29 +445,24 @@ class VoicePipeline:
                     continue
 
                 clean = _strip_for_voice(sentence)
-                if not clean or len(clean) < 3:
-                    continue
-
-                if sentence.strip().startswith("```"):
+                if not clean or len(clean) < 3 or sentence.strip().startswith("```"):
                     continue
 
                 if not header_printed:
                     console.print(f"  [bold green]FRIDAY[/bold green] ", end="")
                     header_printed = True
 
-                # Speak this sentence immediately
                 self._tts.speak(clean)
                 sentences_spoken += 1
 
                 if self._tts._interrupted:
-                    # Drain remaining
                     self._drain_queue(chunk_queue, full_chunks)
                     break
 
             if self._tts._interrupted:
                 break
 
-        # Speak any remaining buffered text
+        # Speak remaining buffer
         if (sentence_buffer.strip()
             and sentences_spoken < MAX_VOICE_SENTENCES
             and not self._tts._interrupted):
@@ -276,7 +473,6 @@ class VoicePipeline:
                     header_printed = True
                 self._tts.speak(clean)
 
-        # Display full response on screen
         full_text = "".join(full_chunks)
         if full_text:
             if not header_printed:
@@ -286,7 +482,6 @@ class VoicePipeline:
 
     @staticmethod
     def _drain_queue(q: queue.Queue, collect: list[str]):
-        """Drain remaining items from queue without speaking."""
         while True:
             try:
                 item = q.get(timeout=30)

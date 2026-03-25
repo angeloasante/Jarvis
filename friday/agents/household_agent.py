@@ -297,7 +297,7 @@ class HouseholdAgent(BaseAgent):
         self.tools = {**TV_TOOLS}
         super().__init__()
 
-    async def run(self, task: str, context: str = "", on_tool_call=None):
+    async def run(self, task: str, context: str = "", on_tool_call=None, on_chunk=None):
         """Fast-path simple commands, LLM for complex ones."""
         import asyncio
         start = time.monotonic()
@@ -334,4 +334,4 @@ class HouseholdAgent(BaseAgent):
             )
 
         # Complex command → LLM handles it
-        return await super().run(task=task, context=context, on_tool_call=on_tool_call)
+        return await super().run(task=task, context=context, on_tool_call=on_tool_call, on_chunk=on_chunk)

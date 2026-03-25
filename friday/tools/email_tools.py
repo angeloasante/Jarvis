@@ -71,7 +71,17 @@ def _parse_email(email_data: dict, include_body: bool = False) -> dict:
     parsed["priority"] = _get_priority(parsed)
 
     if include_body:
-        parsed["body"] = _extract_body(email_data.get("payload", {}))
+        body = _extract_body(email_data.get("payload", {}))
+        # Strip HTML tags for cleaner LLM input
+        if "<html" in body.lower() or "<div" in body.lower():
+            import re as _re
+            body = _re.sub(r"<style[^>]*>.*?</style>", "", body, flags=_re.DOTALL | _re.IGNORECASE)
+            body = _re.sub(r"<[^>]+>", " ", body)
+            body = _re.sub(r"\s+", " ", body).strip()
+        # Truncate individual bodies to avoid overwhelming the LLM
+        if len(body) > 1500:
+            body = body[:1500] + "... (truncated)"
+        parsed["body"] = body
 
     return parsed
 
@@ -168,8 +178,9 @@ async def read_emails(
 
 
 async def search_emails(query: str, limit: int = 10) -> ToolResult:
-    """Search Gmail with a query. Uses Gmail search syntax (from:, subject:, has:attachment, etc.)."""
-    return await read_emails(filter=query, limit=limit, include_body=False)
+    """Search Gmail with a query. Uses Gmail search syntax (from:, subject:, has:attachment, etc.).
+    Includes email bodies so you can answer questions about the content."""
+    return await read_emails(filter=query, limit=limit, include_body=True)
 
 
 async def read_email_thread(thread_id: str) -> ToolResult:

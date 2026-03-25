@@ -8,7 +8,7 @@ import asyncio
 import time
 import json
 from typing import Optional, Callable
-from friday.core.llm import chat, extract_tool_calls, extract_text
+from friday.core.llm import cloud_chat, extract_tool_calls, extract_text
 from friday.core.types import AgentResponse, ToolResult
 
 
@@ -95,7 +95,7 @@ class BaseAgent:
         except Exception as e:
             return ToolResult(success=False, data=str(e))
 
-    async def run(self, task: str, context: str = "", on_tool_call: Optional[Callable] = None) -> AgentResponse:
+    async def run(self, task: str, context: str = "", on_tool_call: Optional[Callable] = None, on_chunk: Optional[Callable] = None) -> AgentResponse:
         """Run the ReAct loop for a given task.
 
         on_tool_call: optional callback(tool_name, tool_args) called before each tool executes.
@@ -112,10 +112,16 @@ class BaseAgent:
         messages.append({"role": "user", "content": task})
 
         for iteration in range(self.max_iterations):
-            response = chat(
+            # After first tool execution, strip tools so the model generates
+            # a text answer instead of wasting prompt eval on tool schemas.
+            # Exception: if max_iterations > 3, agent may need multi-step tools.
+            offer_tools = self.tool_definitions if self.tool_definitions else None
+            if iteration > 0 and tools_called and self.max_iterations <= 5:
+                offer_tools = None
+
+            response = cloud_chat(
                 messages=messages,
-                tools=self.tool_definitions if self.tool_definitions else None,
-                think=False,
+                tools=offer_tools,
             )
 
             tool_calls = extract_tool_calls(response)
@@ -123,6 +129,8 @@ class BaseAgent:
             if not tool_calls:
                 # No tool calls — agent is done
                 text = extract_text(response)
+                if on_chunk and text:
+                    on_chunk(text)
                 return AgentResponse(
                     agent_name=self.name,
                     success=True,
@@ -139,6 +147,9 @@ class BaseAgent:
                 "content": msg.get("content", ""),
                 "tool_calls": msg.get("tool_calls", []),
             })
+
+            # Extract tool call IDs for tool-role messages (required by OpenAI API)
+            raw_tool_calls = msg.get("tool_calls", [])
 
             if len(tool_calls) == 1:
                 # Single tool — run directly
@@ -159,10 +170,14 @@ class BaseAgent:
                 if not result.success and result.error:
                     tool_content["error"] = str(result.error.message) if hasattr(result.error, "message") else str(result.error)
 
-                messages.append({
+                tool_msg = {
                     "role": "tool",
                     "content": json.dumps(tool_content, default=str),
-                })
+                }
+                # Add tool_call_id if available (required by OpenAI/Groq API)
+                if raw_tool_calls and raw_tool_calls[0].get("id"):
+                    tool_msg["tool_call_id"] = raw_tool_calls[0]["id"]
+                messages.append(tool_msg)
             else:
                 # Multiple tools — run in parallel for speed
                 async def _run_tool(tc_item):
@@ -193,10 +208,13 @@ class BaseAgent:
                         if not result.success and result.error:
                             tool_content["error"] = str(result.error.message) if hasattr(result.error, "message") else str(result.error)
 
-                    messages.append({
+                    tool_msg = {
                         "role": "tool",
                         "content": json.dumps(tool_content, default=str),
-                    })
+                    }
+                    if i < len(raw_tool_calls) and raw_tool_calls[i].get("id"):
+                        tool_msg["tool_call_id"] = raw_tool_calls[i]["id"]
+                    messages.append(tool_msg)
 
         # Hit max iterations
         return AgentResponse(

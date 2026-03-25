@@ -274,33 +274,25 @@ class MemoryStore:
         return "\n".join(lines)
 
     def build_context(self, query: str = "") -> str:
-        """Build memory context string for injection into system prompt."""
+        """Build memory context string for injection into system prompt.
+
+        Only injects preferences and person/decision memories — NOT general facts
+        from old conversations, which contaminate responses with stale info
+        (e.g. Neuralink facts bleeding into Halo glasses questions).
+        """
         sections = []
 
-        # Recent memories
+        # User preferences and decisions (useful for personalisation)
+        USEFUL_CATEGORIES = ("preference", "person", "decision")
         recent = self.get_recent(5)
-        if recent:
-            sections.append("RECENT CONTEXT:")
-            for m in recent:
-                sections.append(f"- [{m['category']}] {m['content']}")
-
-        # Semantic search if query provided
-        if query:
-            relevant = self.search(query, n_results=3)
-            if relevant:
-                sections.append("\nRELEVANT MEMORIES:")
-                for m in relevant:
-                    sections.append(f"- {m['content']}")
-
-        # Project memories
-        projects = self.get_by_category("project", 5)
-        if projects:
-            sections.append("\nACTIVE PROJECTS:")
-            for m in projects:
+        useful = [m for m in recent if m.get("category") in USEFUL_CATEGORIES]
+        if useful:
+            sections.append("CONTEXT:")
+            for m in useful:
                 sections.append(f"- {m['content']}")
 
         if not sections:
-            return "No specific context loaded for this session."
+            return ""
 
         return "\n".join(sections)
 

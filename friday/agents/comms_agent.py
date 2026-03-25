@@ -74,5 +74,5 @@ class CommsAgent(BaseAgent):
         }
         super().__init__()
 
-    async def run(self, task: str, context: str = "", on_tool_call=None):
-        return await super().run(task=task, context=context, on_tool_call=on_tool_call)
+    async def run(self, task: str, context: str = "", on_tool_call=None, on_chunk=None):
+        return await super().run(task=task, context=context, on_tool_call=on_tool_call, on_chunk=on_chunk)

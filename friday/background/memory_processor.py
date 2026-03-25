@@ -10,7 +10,7 @@ import logging
 import threading
 from queue import Queue, Empty
 
-from friday.core.llm import chat, extract_text
+from friday.core.llm import cloud_chat, extract_text
 from friday.memory.store import get_memory_store
 
 log = logging.getLogger(__name__)
@@ -56,20 +56,11 @@ class MemoryProcessor:
     def process(self, user_input: str, response: str, agent_name: str | None = None):
         """Queue a conversation exchange for memory extraction.
 
-        Only queues if the exchange looks like it contains new information
-        (agent results, not just casual chat).
+        DISABLED: The LLM call competes for GPU with the main conversation,
+        adding ~7s latency to the next user query. Memory extraction isn't
+        worth the speed tax — important facts are in Gmail, calendar, and git.
         """
-        # Skip trivial exchanges — greetings, short chats, errors
-        if not response or len(response) < 50:
-            return
-        if agent_name is None and len(response) < 100:
-            return  # Short conversational response, skip
-
-        self._queue.put({
-            "user_input": user_input,
-            "response": response,
-            "agent": agent_name,
-        })
+        return
 
     def _worker(self):
         """Background worker — processes queued exchanges."""
@@ -101,7 +92,7 @@ class MemoryProcessor:
             {"role": "user", "content": f"User asked: {user_input}\n\nFRIDAY responded (via {agent}):\n{response}"},
         ]
 
-        result = chat(messages=messages, think=False)
+        result = cloud_chat(messages=messages)
         text = extract_text(result)
 
         # Parse JSON
