@@ -64,7 +64,7 @@ FRIDAY (32s) Three things. Global Talent page        ← 1 LLM call (was 12+)
 
 ```bash
 # 1. Clone the repo
-git clone <repo-url> && cd JARVIS
+git clone <https://github.com/angeloasante/Jarvis.git> && cd JARVIS
 
 # 2. Install dependencies
 uv sync
@@ -115,10 +115,16 @@ Add or remove `GROQ_API_KEY` from `.env` and restart FRIDAY. That's it. No code 
 
 ### Voice Mode
 
-FRIDAY has an always-on ambient voice pipeline. The mic stays open — FRIDAY hears and transcribes everything. Say **"Friday"** naturally at any point (even mid-conversation with someone else) and FRIDAY activates with full context of what was just said.
+FRIDAY supports ambient voice — say **"Friday"** naturally at any point, even mid-conversation, and it activates with context of what was just said. Voice is **off by default** and only runs when you explicitly enable it.
+
+**Privacy model:**
+- **Nothing leaves your machine by default.** Speech recognition (Silero VAD + MLX Whisper) runs entirely on-device. No audio is sent anywhere.
+- Audio is processed in real-time and immediately discarded — FRIDAY keeps a rolling text transcript (last 5 minutes), never raw audio.
+- If you enable cloud TTS (ElevenLabs), only FRIDAY's **response text** is sent to generate speech — your voice and ambient audio still never leave your device.
+- `/listening-off` pauses the mic entirely. `/voice` disables the whole pipeline. You're always in control.
 
 ```bash
-# Start with voice enabled
+# Start with voice enabled (off by default)
 uv run friday --voice
 
 # Or toggle at runtime
@@ -130,8 +136,6 @@ uv run friday --voice
 ```
 
 After FRIDAY responds, you have a **15-second follow-up window** — just keep talking without saying "Friday" again. CLI and voice work simultaneously — type or talk, your choice.
-
-**STT (always local):** Silero VAD + MLX Whisper. Fast, reliable, no cloud dependency.
 
 **TTS (cloud or local — your choice):**
 ```bash
