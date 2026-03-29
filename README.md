@@ -6,9 +6,7 @@
 > **Copyright Travis Moore (Angelo Asante)**
 > Licensed under the Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE) for details.
 
-**Personal AI Operating System** — inspired by Tony Stark's JARVIS/FRIDAY.
-
-Not a chatbot. Not an assistant. A co-founder. A 3am coding partner who remembers you, understands your slang, and gets things done.
+**Personal AI Operating System**
 
 ```
   ███████╗██████╗ ██╗██████╗  █████╗ ██╗   ██╗
@@ -23,9 +21,15 @@ Not a chatbot. Not an assistant. A co-founder. A 3am coding partner who remember
 
 ## What Is FRIDAY?
 
-FRIDAY is a multi-agent AI system that routes your requests to specialist agents — code, research, memory, comms, system, household, monitor, briefing, job — and synthesises their work into a single coherent response. Runs hybrid: cloud inference via Groq for speed (6.5s avg), with automatic fallback to fully local Ollama when offline or if you prefer privacy.
+Tony Stark had JARVIS. This is FRIDAY.
 
-**Core idea:** You talk to FRIDAY. FRIDAY figures out what needs to happen, dispatches the right agent, and delivers the result. You never interact with agents directly.
+Not a demo. Not a wrapper around ChatGPT. A personal AI OS built from scratch — local inference, persistent memory, smart home control, browser automation, email, calendar, iMessage, X, job applications, a hologram display if you're into that.
+
+You talk to it in whatever way you talk. It gets things done without you having to explain yourself twice.
+
+Built by one person in Plymouth, UK, at 3am, between night shifts. Apache 2.0. Use it. Build on it. Just don't pretend you made it.
+
+Runs hybrid: cloud inference via Groq for speed (6.5s avg), with automatic fallback to fully local Ollama when offline or if you prefer privacy.
 
 ```
 You: "man, you good?"
@@ -48,7 +52,21 @@ FRIDAY: On it. Keep chatting, I'll holler when done.
 FRIDAY (32s) Three things. Global Talent page        ← 1 LLM call (was 12+)
   updated. Sam George tweeted about digital
   infrastructure. Calendar's empty...
+
+You: "watch father in law's messages for the next hour, reply as friday"
+FRIDAY: Got it. Watching every 60 seconds.           ← standing order created
+  💛 FRIDAY Watch — replied to Father In Law:        ← background, autonomous
+  "FRIDAY: He's building me right now, I'll
+  let him know you texted."
+
+You (in iMessage to father in law): "I'm innocent 😂 @friday defend me here wai"
+  💛 FRIDAY Watch — replied to Father In Law:        ← tagged mid-conversation
+  "FRIDAY: 😂😂😂 As told by Travis, who's busy
+   not telling me to chill. (I'm just the AI,
+   don't shoot the messenger)"
 ```
+
+That last one actually happened. 2:50am. Father-in-law sent a LeBron reaction image. FRIDAY held down the conversation while Travis was building her. iMessage became a command interface — type `@friday` mid-chat, FRIDAY picks it up, acts on it, replies. The other person just thinks you're having a laugh.
 
 ---
 
@@ -115,7 +133,7 @@ Add or remove `GROQ_API_KEY` from `.env` and restart FRIDAY. That's it. No code 
 
 ### Voice Mode
 
-FRIDAY supports ambient voice — say **"Friday"** naturally at any point, even mid-conversation, and it activates with context of what was just said. Voice is **off by default** and only runs when you explicitly enable it.
+FRIDAY supports ambient voice — say **"Friday"** naturally at any point. Works well in quiet environments and moderate background noise. Loud music or overlapping conversations will reduce accuracy — even Siri and Alexa struggle here. A denoiser pre-processing step (coming soon) improves this significantly. Voice is **off by default** and only runs when you explicitly enable it.
 
 **Privacy model:**
 - **Nothing leaves your machine by default.** Speech recognition (Silero VAD + MLX Whisper) runs entirely on-device. No audio is sent anywhere.
@@ -135,7 +153,7 @@ uv run friday --voice
 /listening-on
 ```
 
-After FRIDAY responds, you have a **15-second follow-up window** — just keep talking without saying "Friday" again. CLI and voice work simultaneously — type or talk, your choice.
+After FRIDAY responds, you have an **8-second follow-up window** — just keep talking without saying "Friday" again. CLI and voice work simultaneously — type or talk, your choice.
 
 **TTS (cloud or local — your choice):**
 ```bash
@@ -169,6 +187,23 @@ uv run python -m friday.tools.google_auth
 ```
 
 **Note:** If your app is in "Testing" mode in Google Cloud Console, add your email as a test user under OAuth consent screen → Test users.
+
+### WhatsApp Setup
+
+FRIDAY can read and send WhatsApp messages through a local Node.js bridge. No third-party servers — runs entirely on your machine.
+
+```bash
+# 1. Install bridge dependencies
+cd friday/whatsapp && npm install
+
+# 2. Start the bridge (first time — shows QR code)
+node server.js
+
+# 3. Scan the QR code with WhatsApp → Linked Devices → Link a Device
+# 4. Once connected, FRIDAY can use WhatsApp
+```
+
+After pairing, the session persists — restart the bridge anytime without re-scanning. For background running, auto-start on login, and troubleshooting — see [docs/whatsapp-setup.md](docs/whatsapp-setup.md).
 
 ---
 
@@ -277,6 +312,11 @@ JARVIS/
 │   │   ├── memory_tools.py    # ChromaDB + SQLite memory operations
 │   │   ├── email_tools.py     # Gmail read, search, send, draft, label
 │   │   ├── calendar_tools.py  # macOS/iCloud Calendar read + create events
+│   │   ├── imessage_tools.py  # iMessage read/send + FaceTime + Contacts
+│   │   ├── whatsapp_tools.py  # WhatsApp read/send/search via Baileys bridge
+│   │   ├── cron_tools.py      # Scheduled task CRUD (create, list, delete, toggle)
+│   │   ├── watch_tools.py     # Standing orders — create, list, cancel watch tasks
+│   │   ├── notify.py          # Phone notifications via iMessage to self
 │   │   ├── tv_tools.py        # LG TV WebOS control + WakeOnLan (18 tools)
 │   │   ├── pdf_tools.py       # PDF read, merge, split, rotate, encrypt, watermark
 │   │   ├── call_tools.py      # Phone, FaceTime, WhatsApp call history
@@ -291,13 +331,23 @@ JARVIS/
 │   │   ├── vad.py             # Silero VAD v6 wrapper (speech detection)
 │   │   ├── stt.py             # MLX Whisper local transcription
 │   │   └── tts.py             # ElevenLabs streaming (cloud) + Kokoro ONNX (local fallback)
+│   ├── background/
+│   │   ├── monitor_scheduler.py # APScheduler background monitor jobs
+│   │   ├── heartbeat.py       # Proactive awareness loop (30min ticks, zero-LLM silent checks)
+│   │   ├── cron_scheduler.py  # User-defined scheduled tasks (APScheduler + SQLite)
+│   │   ├── github_sync.py     # Background GitHub project sync
+│   │   └── memory_processor.py # Background memory processing
 │   ├── memory/
 │   │   └── store.py           # Hybrid memory (semantic + structured)
+│   ├── whatsapp/
+│   │   ├── server.js          # Baileys HTTP bridge (Express + WhatsApp Web)
+│   │   └── package.json       # Node.js dependencies
 │   └── skills/                # (Phase 5 — knowledge docs for agents)
 ├── Idea/                      # Design docs, system maps, tool specs
 ├── docs/
 │   ├── progress.md            # Development log
 │   ├── ollama-setup.md        # Local LLM setup guide (Ollama)
+│   ├── whatsapp-setup.md      # WhatsApp integration setup (Baileys bridge)
 │   ├── friday-glasses-integration.md  # Halo glasses integration spec
 │   └── background/
 │       └── monitor_scheduler.py # APScheduler background monitor jobs
@@ -362,9 +412,9 @@ The brain's filing system. Stores decisions, lessons, and context for future rec
 
 ### Comms Agent
 
-The mouth and schedule. Handles all email and calendar operations.
+The mouth and schedule. Handles email, calendar, iMessage, FaceTime, and contacts.
 
-**Tools:** `read_emails`, `search_emails`, `read_email_thread`, `send_email`, `draft_email`, `send_draft`, `edit_draft`, `get_calendar`, `create_event`
+**Tools:** `read_emails`, `search_emails`, `read_email_thread`, `send_email`, `draft_email`, `send_draft`, `edit_draft`, `get_calendar`, `create_event`, `read_imessages`, `send_imessage`, `start_facetime`, `search_contacts`, `send_whatsapp`, `read_whatsapp`, `search_whatsapp`, `whatsapp_status`
 
 **Capabilities:**
 - Read, search, and triage Gmail (priority-sorted: critical → high → normal)
@@ -372,14 +422,20 @@ The mouth and schedule. Handles all email and calendar operations.
 - Full draft lifecycle — create, edit, and send Gmail drafts by ID
 - Read macOS/iCloud Calendar (day/week view, next event) — no API keys needed
 - Create calendar events via AppleScript — syncs to iCloud automatically
+- **iMessage** — read conversations from `chat.db`, send texts via Messages.app AppleScript
+- **FaceTime** — initiate video/audio calls, multi-number contact handling
+- **Contacts** — search Contacts.app with fuzzy matching, nickname resolution, emoji support
+- **WhatsApp** — read chats, send messages, search across conversations via local Baileys bridge (Node.js)
+- **Smart contact resolution** — "Ellen's pap", "my bby", "father in law" all resolve correctly via word-overlap scoring
+- **NSAttributedString parsing** — extracts text from newer iMessage binary format (`attributedBody`)
+- **Channel-aware** — after reading iMessages, replies go via `send_imessage` (never `draft_email`)
+- **Tone matching** — reads recent messages to match the conversation's vibe when drafting
 - Priority sender flagging — Paystack/Stripe = critical, Railway/GitHub = high
 - Coding hours warning — flags events during 10pm-4am
-- Follow-up awareness — "send it" after discussing a draft routes back to comms agent
-- One-shot patterns — most requests complete in a single tool call
 
-**Safety gates:** `send_email`, `send_draft`, and `create_event` all require `confirm=True`. FRIDAY always previews before acting.
+**Safety gates:** `send_email`, `send_draft`, `send_imessage`, `send_whatsapp`, and `create_event` all require `confirm=True`. FRIDAY always previews before acting.
 
-**Setup:** Email requires Google OAuth2 — see [Google API Setup](#google-api-setup) below. Calendar works out of the box (reads native macOS Calendar via AppleScript).
+**Setup:** Email requires Google OAuth2 — see [Google API Setup](#google-api-setup) below. Calendar, iMessage, FaceTime, and Contacts work out of the box (native macOS APIs, no API keys needed). iMessage reading requires Full Disk Access for `chat.db`. WhatsApp requires the Baileys bridge — see [docs/whatsapp-setup.md](docs/whatsapp-setup.md).
 
 ### System Agent
 
@@ -387,7 +443,7 @@ The body. Controls the Mac itself — apps, browser, terminal, files.
 
 **Core Tools (always loaded):** `run_command`, `run_background`, `open_application`, `take_screenshot`, `get_system_info`, `run_applescript`, `read_file`, `list_directory`
 
-**Browser Tools (loaded on demand):** `browser_navigate`, `browser_screenshot`, `browser_click`, `browser_get_text`, `browser_wait_for_login`
+**Browser Tools (loaded on demand):** `browser_navigate`, `browser_screenshot`, `browser_click`, `browser_get_text`, `browser_wait_for_login`, `browser_discover_form`, `browser_fill_form`, `browser_upload`
 
 **PDF Tools (loaded on demand):** `pdf_read`, `pdf_metadata`, `pdf_merge`, `pdf_split`, `pdf_rotate`, `pdf_encrypt`, `pdf_decrypt`, `pdf_watermark`
 
@@ -396,15 +452,16 @@ The body. Controls the Mac itself — apps, browser, terminal, files.
 - Run terminal commands with safety checks + background processes
 - Take screenshots (saved to `~/Downloads/friday_screenshots/`)
 - Run AppleScript for Mac automation (dark mode, volume, UI control)
-- Automated browsing with **persistent sessions** — uses real Chrome, logins saved permanently
+- Automated browsing with **persistent sessions** — uses Safari with your existing sessions/cookies
 - **Login detection** — detects login pages, pauses for manual login, then continues
 - Navigate, click, fill forms, read page content
+- **"Fill the form on my screen"** — discovers all fields on the current Safari page, batch-fills with Travis's details (name, email, phone, LinkedIn, GitHub, website, location), uploads CV if needed, verifies all required fields are filled
 - System info — CPU, memory, disk, uptime
 - **PDF operations** — read/extract text+tables, merge, split, rotate, encrypt/decrypt, watermark, metadata
 
-**Persistent browser:** Uses your installed Google Chrome with a FRIDAY-specific profile (`~/.friday/browser_data/`). Log in once and sessions are saved — no re-authentication needed.
+**Browser engine:** Safari via AppleScript + JavaScript injection — uses your actual Safari with all existing cookies, sessions, saved passwords. No login walls. No Selenium, no Playwright. One JS call fills entire forms.
 
-**Dynamic tool loading:** Browser and PDF tools are only injected when the task mentions them. Base tool count stays at 8 (comfortable for 9B models), scales to 13 (browser) or 16 (PDF) when needed.
+**Dynamic tool loading:** Browser, PDF, screen, and form tools are only injected when the task mentions them. Base tool count stays at 8 (comfortable for 9B models), scales to 18+ (browser + forms) or 16 (PDF) when needed. Form tasks also get CV tools and higher iteration limits (15 vs default 5).
 
 **Safety:** Dangerous buttons (pay, delete, submit) require explicit confirmation. Dangerous terminal commands are blocked.
 
@@ -542,31 +599,31 @@ The morning voice. Synthesises monitor alerts, emails, and calendar into tight, 
 
 The career arm. Doesn't just generate CVs — actually applies to jobs autonomously.
 
-**Tools:** `get_cv`, `tailor_cv`, `write_cover_letter`, `generate_pdf` + `search_web`, `fetch_page` + `browser_navigate`, `browser_screenshot`, `browser_click`, `browser_fill`, `browser_get_text`, `browser_wait_for_login`, `browser_close` + `read_emails`, `search_emails` (15 tools)
+**Tools:** `tailor_cv`, `generate_pdf` + `search_web` + `browser_navigate`, `browser_discover_form`, `browser_fill_form`, `browser_screenshot`, `browser_click`, `browser_type`, `browser_scroll`, `browser_upload`, `browser_get_text`, `browser_execute_js`, `browser_elements`, `browser_wait_for_login` (15 tools, 30 max iterations)
 
 **Capabilities:**
-- Structured CV data as single source of truth (`friday/data/cv.py`) — dark sidebar design
-- CV tailoring — reorders and rephrases experience for specific job descriptions
-- Cover letter generation — confident, specific, no corporate fluff
+- **3-phase autonomous workflow:** search for the job → tailor CV to the JD → fill the application form
+- Searches company career pages itself — uses official sites, follows redirects to Greenhouse/Lever/Workday
+- CV tailoring — rewrites summary and reorders experience for specific job descriptions (not generic)
 - PDF generation via WeasyPrint + Jinja2 — dark sidebar A4 layout with lime accent
-- **Autonomous job applications** — browses job sites, reads JDs, tailors CV, fills forms
-- **Email scanning** — finds job openings in Gmail, extracts roles/links/deadlines
-- **Multi-step form filling** — navigates application pages, fills personal details, uploads CV
-- Company/role research via web tools before applying
+- **Batch form filling** — `browser_discover_form` scrolls the entire page and finds ALL fields, `browser_fill_form` fills everything in a single JS call (150s → 15s)
+- **React-Select dropdown support** — detects React-Select inputs, types to search, clicks option
+- **File upload via DataTransfer API** — bypasses Safari's file chooser restriction, injects file directly
+- **Verification loop** — keeps calling `browser_discover_form` until `all_required_filled` is true
 - Login detection — pauses for manual login on protected job portals
 - Never invents experience — only reframes existing data
 
-**Safety:** Always screenshots before submit, never clicks submit without Travis confirming.
+**Safety:** Always asks Travis before final submit. Never clicks submit without confirmation.
 
 **Name handling:** Uses "Angelo Asante" (gov name) on all professional documents. "Travis Moore" is casual/preferred only.
 
 **Example commands:**
 ```
-"apply for this role: [URL]"
-"check my emails for job openings"
+"apply for software engineer at Anthropic"
 "go on LinkedIn and apply for AI engineer roles"
 "tailor my CV for [role] at [company]"
 "generate my CV as PDF"
+"fill the form on my screen"
 ```
 
 **PDF output:** Saved to `~/.friday/data/cv_output/`
@@ -621,6 +678,297 @@ Memory is injected into every system prompt so FRIDAY has context about you, you
 
 ---
 
+## Standing Orders (Watch Tasks)
+
+This is the real autonomy. You tell FRIDAY to watch someone's messages and handle them while you're busy. It runs in the background, checks every 60 seconds, and only acts when something new comes in.
+
+```
+"watch Teddy Bear's messages for the next hour, reply like me"
+"check father in law's messages every 60 seconds, reply as friday"
+"do the same for My Bby"
+"watch my emails for anything from Stripe, notify me"
+"check for missed calls every 2 minutes, ping me if anything comes in"
+"open LinkedIn and check for new notifications every 5 minutes"
+```
+
+Real example from a live session:
+
+```
+You: "watch father in law's messages, reply as friday"
+FRIDAY: Got it. Watching every 60 seconds.
+
+  💛 FRIDAY Watch — replied to Ellen's Pap:
+  "FRIDAY: Hi, I'm FRIDAY — Travis's AI assistant.
+   He's been busy building me. I read your chat
+   and noticed you mentioned your eyes — how are
+   they feeling?"
+```
+
+### How It Works
+
+FRIDAY classifies each watch by keywords and dispatches to the right executor:
+
+| Watch Type | Keywords | What It Does |
+|------------|----------|--------------|
+| **iMessage** | (default) | Reads messages, reasons about replies, sends as you or FRIDAY |
+| **Email** | "email", "inbox", "gmail" | Reads unread emails, filters by sender keyword, notifies on new matches |
+| **Missed Calls** | "missed call", "call log" | Reads call history, fingerprints latest, notifies on new missed calls |
+| **Browser** | "linkedin", "website", "notifications" | Opens URL via Playwright, hashes page content, LLM summarizes changes |
+
+**iMessage flow:**
+
+1. **Baseline set** — first tick records the current conversation state. No phantom replies.
+2. **Every 60s** — reads the latest received messages, compares fingerprint against last check.
+3. **Nothing new?** — skip. Zero LLM cost. Zero API calls beyond the message read.
+4. **New message?** — checks if you already replied. If yes, skip.
+5. **Unreplied?** — reads last 20 messages for full context, then 1 LLM call drafts the reply matching the conversation vibe.
+6. **Sends it** — updates state so the same message never triggers twice.
+
+**Email/Calls/Browser flow:** Each tick reads the relevant data, compares against the last known state fingerprint, and sends a phone notification if something new shows up. No auto-replying — just monitoring and alerting.
+
+### FRIDAY Reasons Before Replying
+
+Not every message needs a reply. If someone says "okay" or "lol" or drops a thumbs up, FRIDAY leaves it alone. The LLM decides: does this actually need a response, or would replying be forced?
+
+### Tag FRIDAY In a Conversation
+
+Type `@friday` in any iMessage conversation and FRIDAY picks it up. She reads the full thread, understands the vibe, and jumps in as herself. She addresses what the other person said AND what you said. She's got your back.
+
+**Note:** For @friday tagging to work, a watch must be active for that conversation. The watch is what checks for new messages every 60 seconds — that's how FRIDAY sees your tag. No watch, no pickup.
+
+This turns iMessage into a command interface for FRIDAY. You never leave the chat. The other person doesn't know you're directing an AI mid-conversation — they just think you're having a laugh.
+
+```
+You (in iMessage): "I'm innocent 😂 @friday defend me here wai"
+
+  💛 FRIDAY Watch — replied:
+  "FRIDAY: 😂😂😂 As told by Travis, who's busy not telling me
+   to chill. (I'm just the AI, don't shoot the messenger)"
+```
+
+That's not a technical benchmark or a briefing output — it's FRIDAY holding down your relationships at 2:50am while you build her. Unscripted. Reading the room. Personality fully there.
+
+### Identity Switching
+
+FRIDAY figures out who she should be based on context:
+
+- **"reply as me"** — replies as you. Your tone, your energy. The other person doesn't know it's AI.
+- **"reply as friday"** — prefixes with "FRIDAY:" so they know it's the AI.
+- **You tag FRIDAY** — text "@friday am I lying?" or "@friday defend me" in the actual iMessage conversation and FRIDAY jumps in as herself, backs you up.
+- **You introduce FRIDAY** — if you text "she's my AI, called Friday" in the conversation, FRIDAY picks up on it and starts replying as herself.
+- **They mention FRIDAY** — if the other person says "Friday stop" or "Friday please", FRIDAY switches to herself and responds to what they said.
+
+### Deflection Rules
+
+FRIDAY won't commit you to things:
+
+- **Calls** — "I'm busy building something right now, I'll call you later"
+- **Money** — "Noted, I'll keep it in mind" / "I'll send it when I'm ready"
+- **Plans** — deflects, says you're working on something
+- **"Stop replying"** — FRIDAY respects it, lets them know you're busy
+
+### Updating a Watch
+
+Say "actually reply as FRIDAY" or "change it to every 2 minutes" — FRIDAY updates the existing watch for that contact instead of creating a duplicate.
+
+### CLI
+
+```
+/clearwatches          # kill all active watches instantly
+```
+
+Or tell FRIDAY naturally: "cancel all watches", "stop watching Teddy's messages"
+
+---
+
+## Cron Jobs (Scheduled Tasks)
+
+Set recurring tasks in plain English. FRIDAY converts them to cron schedules.
+
+```
+"every morning at 8am, run my briefing"
+"every friday at 5pm, check my emails and send me a summary"
+"every 30 minutes, check if the gov.uk visa page changed"
+```
+
+Managed conversationally — create, list, delete, toggle on/off. Persisted in SQLite, survives restarts.
+
+---
+
+## Phone Notifications
+
+FRIDAY sends you alerts via iMessage to your own number. Works instantly, even in DND if you add your own number to the allowed list.
+
+```
+  💛 FRIDAY Watch — replied to Teddy Bear: "I miss you too, rest up"
+  ↑ sent to phone
+```
+
+Every watch task reply, heartbeat alert, and proactive notification hits your phone. No custom app needed (yet).
+
+---
+
+## Multi-Agent Deep Research
+
+For anything that needs multiple agents working together — research papers, reports, improving existing documents. FRIDAY breaks the task into phases, dispatches parallel sub-agents, and produces a real deliverable.
+
+```
+"do a deep research about energy barriers and create a paper on my desktop"
+"read my thesis, research its topics, improve it to research-paper grade"
+"I have an idea about using fans and litmus paper to create a tiny missile for a school project. research it and build a submission-ready file in my downloads"
+"write a detailed report about AI in healthcare"
+"research quantum computing breakthroughs in 2025 and save a report"
+"analyze the impact of social media on mental health and create a detailed paper"
+```
+
+Files are saved to the location you specify. If you don't specify, FRIDAY saves to `~/Documents/friday_files/` — keeps your Desktop clean.
+
+### How It Works
+
+1. **Planner** (1 LLM call) — breaks the task into phases with typed steps: SEARCH, FETCH, READ_FILE, WRITE
+2. **Phase execution** — steps in the same phase run in parallel. Phase 1 might read an existing file. Phase 2 dispatches 4-6 search agents simultaneously, each running multiple queries + page fetches.
+3. **Section writers** (parallel LLM calls) — each section of the document is written by a separate LLM call, all at once. Research data is partitioned so each writer focuses on its section.
+4. **Synthesis** (1 LLM call) — writes the abstract and conclusion across all sections.
+5. **Saves to disk** — wherever you specify, or `~/Documents/friday_files/` by default. Defaults to `.docx` format. Supports `.docx`, `.md`, `.txt`, `.pdf` — just say the format in your request.
+
+Why is it fast? Because nothing waits. Phase 2 fires 4-6 search agents at once — while one is fetching a page, three others are running different queries. Section writers all run simultaneously — a 6-section paper generates all 6 sections in parallel, not one after another. The only sequential parts are planning (1 LLM call) and final synthesis (1 LLM call). Everything in between is parallel.
+
+### Real Example
+
+```
+You: "do a research about elements and materials that can create energy barriers —
+      plasma shields, electromagnetic fields, metamaterials. save a research paper."
+
+  ◈ Planning task structure...
+  ◈ Plan: 16 steps across 3 phases
+  ◈   Phase 1: [READ_FILE] Read existing background knowledge
+  ◈   Phase 2: [SEARCH] Research plasma shields
+  ◈   Phase 2: [SEARCH] Research electromagnetic fields
+  ◈   Phase 2: [SEARCH] Research metamaterials
+  ◈   Phase 2: [SEARCH] Comparative study of energy barrier technologies
+  ◈   Phase 2: [SEARCH] Locate peer-reviewed scientific literature
+  ◈   Phase 2: [SEARCH] Analyze practical and economic considerations
+  ◈   Phase 2: [SEARCH] Future directions and advancements
+  ◈ Phase 1: running 1 steps in parallel...
+  ◈ Phase 2: running 7 steps in parallel...
+  ◈ Phase 3: running 8 steps in parallel...
+  ◈ Data gathered: 7 sources, 56000 chars
+  ◈ Writing 8 sections...
+  ◈ Sections written: 8/8
+  ◈ Writing abstract and conclusion...
+  ◈ Assembling final document...
+  ◈ Done. 8 sections, 0 sources, 31680 chars.
+    Saved to ~/Documents/friday_files/Research_on_Energy_Barriers_...20260327.docx
+    (200s, 36 tool calls)
+```
+
+8 sections. 31,680 characters. 36 tool calls. 7 web sources fetched. One `.docx` file with abstract, table of contents, full sections, conclusion, and references. All from a single sentence.
+
+### Where Files Go
+
+| You say | Saves to |
+|---------|----------|
+| "save on my desktop" | `~/Desktop/` |
+| "save in downloads" | `~/Downloads/` |
+| Nothing specified | `~/Documents/friday_files/` |
+
+### Output Formats
+
+Default is `.docx`. Say the format in your request to override:
+
+| You say | Format |
+|---------|--------|
+| "save as a docx" / nothing specified | `.docx` |
+| "save as markdown" / "save as .md" | `.md` |
+| "save as a text file" / "save as .txt" | `.txt` |
+| "save as pdf" | `.pdf` |
+
+You can also convert existing files: *"convert my thesis to pdf"*, *"change that report to markdown"*.
+
+### Use Cases
+
+- **School/uni submissions** — "I have an idea about X for my school project. Research it and build a submission-ready file"
+- **Work reports** — "write a detailed report about our Q1 performance metrics"
+- **Thesis improvement** — "read my thesis at ~/Documents/thesis.md, research its topics, improve it"
+- **Idea exploration** — "I think metamaterials could be used for cloaking. Deep dive and save a paper"
+- **Literature review** — "do a comprehensive literature review on CRISPR gene editing"
+- **Competitive analysis** — "research the top 5 AI coding assistants and create a comparison report"
+
+---
+
+## Improvement Mode
+
+Have an existing document? FRIDAY improves it.
+
+```
+"read my thesis at ~/Documents/thesis.md and improve it to research-paper grade"
+```
+
+FRIDAY reads what you wrote, researches the topics it finds, rewrites each section with new evidence and citations, and preserves your voice throughout. Not a rewrite — an upgrade.
+
+1. **Reads your document** (Phase 1) — understands structure, arguments, voice
+2. **Researches the topics it finds** (Phase 2, parallel) — 4-6 search agents fire simultaneously
+3. **Rewrites each section** (Phase 3, parallel) — strengthens arguments, adds citations, fills gaps
+4. **Preserves your voice** — the ideas stay yours. The evidence and structure get better.
+
+Works with any format FRIDAY can read: `.docx`, `.md`, `.txt`.
+
+---
+
+## Screen Vision & Question Solver
+
+Ask FRIDAY to look at your screen — read text, understand what's on it, or solve every question on a page. On-command only, never watches passively. Privacy-gated behind `FRIDAY_SCREEN_ACCESS=true` in `.env`.
+
+```
+"what's on my screen"                              → OCR + vision analysis
+"what error is this"                               → diagnoses errors on screen
+"read the text on screen"                          → Apple Vision OCR
+"solve the questions on my screen"                 → full-page capture + solve + .docx
+"open Safari and solve the questions on that page" → targets a specific app
+"just solve what's on my screen right now"         → viewport-only, no scrolling
+```
+
+**Screen Reading:**
+
+1. Takes a screenshot of the frontmost window (not full screen — no dock/menu bar noise)
+2. Runs Apple Vision OCR (offline, free, fast) to extract all text
+3. If Qwen2.5-VL is available (via Ollama), sends the image for full visual understanding
+4. If no vision model, falls back to OCR text + LLM to answer
+
+**Full-Page Question Solver:**
+
+The killer feature. FRIDAY scrolls through an entire page (browser, PDF, Word doc — any app), OCRs every viewport, deduplicates overlapping text, then solves every question it finds. Answers are saved to a well-formatted `.docx` with proper headings, bold terms, numbered lists, and structured explanations.
+
+How it works under the hood:
+1. Activates the target app (if specified) and clicks the content area
+2. Scrolls to the top of the page (`Cmd+Up`)
+3. Captures + OCRs each viewport, scrolls down, repeats (up to 20 pages)
+4. Deduplicates overlapping text between frames (filters UI chrome before comparison)
+5. Cleans OCR output — strips browser toolbar, menu bar, short UI fragments
+6. Sends clean text to LLM with structured solving prompt
+7. Saves formatted answers to `~/Documents/friday_files/Screen_Answers_<timestamp>.docx`
+
+Works with any scrollable app. Tested on Safari with a 20-page workbook — captured all questions, solved them with detailed paragraph-length answers.
+
+**App Targeting:** Say which app to look at and FRIDAY activates it before capturing. "Open Safari and solve the questions" or "solve questions in Preview". If you don't specify, it uses whatever's in front.
+
+**Viewport-Only Mode:** When you just want the current view solved without scrolling the whole page, say "just solve what's on my screen" — captures one frame, solves, done.
+
+Screenshots auto-delete after 48 hours. Nothing is stored permanently.
+
+**Setup:**
+```bash
+# Required — enable screen access
+echo "FRIDAY_SCREEN_ACCESS=true" >> .env
+
+# Optional — pull vision model for full image understanding
+ollama pull qwen2.5vl:7b
+```
+
+Without the vision model, FRIDAY can still read all text on screen (OCR) and answer questions about it. The vision model adds app/UI/diagram recognition.
+
+---
+
 ## CLI Commands
 
 | Command | Description |
@@ -631,6 +979,7 @@ Memory is injected into every system prompt so FRIDAY has context about you, you
 | `/voice` | Toggle voice pipeline on/off |
 | `/listening-off` | Pause ambient listening |
 | `/listening-on` | Resume ambient listening |
+| `/clearwatches` | Kill all active watch tasks |
 
 ---
 
@@ -670,7 +1019,14 @@ FRIDAY isn't generic. It's built for Travis — a Ghanaian founder based in Plym
 | **HTTP** | httpx | Async, modern, follow redirects |
 | **Google APIs** | google-api-python-client + google-auth-oauthlib | Gmail OAuth2 |
 | **Calendar** | AppleScript + macOS Calendar.app | Native iCloud/local calendar, no API keys |
-| **Browser Automation** | Playwright + Chrome (persistent sessions) | Navigate, click, fill, screenshot, login detection |
+| **iMessage** | SQLite (`chat.db`) + AppleScript Messages.app | Read conversations + send texts, no API keys |
+| **FaceTime** | AppleScript FaceTime.app | Initiate calls, multi-number support |
+| **Contacts** | AppleScript Contacts.app | Fuzzy search, nickname resolution, emoji support |
+| **Cron/Scheduler** | APScheduler CronTrigger + SQLite | User-defined scheduled tasks, persistent across restarts |
+| **Standing Orders** | APScheduler (30s ticks) + SQLite + LLM reasoning | Watch iMessages (auto-reply), emails, missed calls, browser pages — type-classified dispatch |
+| **Phone Notifications** | iMessage to self | Instant alerts to iPhone, DND bypass capable |
+| **Screen Vision & Solver** | Apple Vision (Swift OCR) + Qwen2.5-VL (Ollama) | Screen reading, full-page scroll+OCR, question solver → formatted .docx |
+| **Browser Automation** | Safari (Selenium) + Playwright fallback | Safari = your sessions/cookies, no login walls. Playwright fallback for headless. |
 | **TV Control** | pywebostv + wakeonlan | LG TV local API over WiFi, no cloud dependency |
 | **Background Jobs** | APScheduler | Persistent monitor scheduling, async event loop integration |
 | **PDF Generation** | WeasyPrint + Jinja2 | CV and cover letter PDF rendering, clean A4 layout |
@@ -688,12 +1044,14 @@ FRIDAY isn't generic. It's built for Travis — a Ghanaian founder based in Plym
 
 ### Phase 1 — Core System (Complete)
 - [x] Multi-agent orchestrator with smart routing
-- [x] 10 specialist agents (Code, Research, Memory, Comms, System, Household, Monitor, Briefing, Job, Social)
+- [x] 11 specialist agents (Code, Research, Deep Research, Memory, Comms, System, Household, Monitor, Briefing, Job, Social)
 - [x] Tool library (web, file, terminal, memory, email, calendar, mac, browser)
 - [x] Gmail integration — read, search, send, draft, edit draft, send draft, label, thread
 - [x] macOS/iCloud Calendar integration — day/week view, create events (no API keys needed)
 - [x] Mac control — AppleScript, app launcher, screenshots, volume, dark mode
-- [x] Browser automation — Playwright + Chrome with persistent sessions and login detection
+- [x] Screen vision — OCR (Apple Vision, offline) + image understanding (Qwen2.5-VL), auto-cleanup after 48h
+- [x] Full-page question solver — scroll + OCR entire pages, solve all questions, save formatted .docx, app targeting, viewport-only mode
+- [x] Browser automation — Safari (Selenium, your sessions) + Playwright fallback, login detection
 - [x] LG TV control — WebOS local API + WakeOnLan (no cloud)
 - [x] Persistent monitoring — URL/topic/search watchers with material change detection
 - [x] Briefing system — morning/evening/quick briefings from monitor alerts + email + calendar
@@ -762,6 +1120,34 @@ FRIDAY isn't generic. It's built for Travis — a Ghanaian founder based in Plym
 - [x] `/listening-off` and `/listening-on` CLI commands
 - [x] Cloud vs local TTS — set/remove `ELEVENLABS_API_KEY` in `.env` to switch
 
+### Phase 4.5 — Autonomy: Heartbeat, Cron, Watch Tasks, iMessage, Notifications (Complete)
+- [x] iMessage integration — read conversations from `chat.db`, send via AppleScript, NSAttributedString parsing
+- [x] FaceTime integration — initiate video/audio calls, multi-number contact handling
+- [x] Contact resolution — fuzzy matching with word-overlap scoring, nickname/emoji support
+- [x] Heartbeat system — proactive background loop (30min default), zero-LLM silent ticks, 1 LLM synthesis only when urgent
+- [x] Configurable via `HEARTBEAT.md` — plain English, editable at runtime
+- [x] Quiet hours (1am-7am), daily alert cap (3/day), morning briefing trigger
+- [x] Cron scheduler — user-defined scheduled tasks, standard 5-field cron expressions
+- [x] Cron tools — `create_cron`, `list_crons`, `delete_cron`, `toggle_cron` (conversational creation)
+- [x] **Standing orders (watch tasks)** — "watch X's messages for the next hour, reply like me"
+- [x] Watch task reasoning — LLM decides if a message needs a reply (skips "okay", "lol", thumbs up)
+- [x] Watch identity switching — reply as Travis or as FRIDAY based on instruction + conversation context
+- [x] Auto-detection — if Travis introduces FRIDAY or the other person mentions her, she switches to herself
+- [x] @friday tagging — type `@friday` in iMessage mid-conversation and she jumps in (requires active watch)
+- [x] Deflection rules — never agrees to calls, money, or plans. Deflects casually.
+- [x] Watch deduplication — updating a watch for the same contact modifies the existing one, no duplicates
+- [x] Baseline-first — first tick records state, only replies on genuinely new messages after watch creation
+- [x] **Watch type classification** — keyword dispatch to iMessage, email, calls, or browser executors
+- [x] **Email watch** — reads unread emails, filters by sender keyword, notifies on new matches
+- [x] **Call log watch** — reads missed calls, fingerprints latest, notifies on new missed calls
+- [x] **Browser watch** — opens URL via Playwright, hashes page content, LLM summarizes changes
+- [x] Phone notifications — iMessage to self, instant delivery, works with DND bypass
+- [x] `/clearwatches` CLI command — kill all active watches instantly
+- [x] All background systems boot automatically on CLI startup
+- [x] **Screen vision** — "can you see what I'm doing", OCR + vision model, privacy-gated, 48h auto-delete
+- [x] **Full-page question solver** — "solve the questions on Safari", scrolls entire page, OCRs + deduplicates, solves all questions, saves formatted .docx with app targeting and viewport-only mode
+- [x] **Multi-agent deep research** — parallel sub-agents (search + fetch + read + write), phased execution, produces real documents saved to disk
+
 ### Phase 5 — Intelligence
 - [ ] Skill system (knowledge docs agents read before executing)
 - [ ] Fine-tuning data collection from sessions
@@ -770,8 +1156,10 @@ FRIDAY isn't generic. It's built for Travis — a Ghanaian founder based in Plym
 - [ ] Self-hosted inference on Modal/RunPod (for privacy or custom fine-tuned models)
 
 ### Phase 6 — Ecosystem
+- [ ] FRIDAY iOS app — native push notifications via APNs, full assistant UI
+- [ ] Mac Mini server — FRIDAY runs 24/7, ngrok/tunnel for remote access
 - [ ] Redis async messaging between agents
-- [ ] MCP server integration
+- [ ] MCP server integration (Twilio official MCP available)
 - [ ] Screenpipe integration (screen context awareness)
 - [ ] Self-improving loop (auto fine-tune from corrections)
 - [ ] Multi-user support

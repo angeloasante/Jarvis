@@ -23,18 +23,22 @@ _CLASSIFY_PROMPT = """You are a router. Classify the user's intent into one agen
 Agents:
 - code_agent: Code, files, git, terminal, debugging, scripts, deploy
 - research_agent: Web search, factual questions about the WORLD (not about the user's device), topic lookup, "who is [person]", "what is [concept]"
-- memory_agent: "Remember this", "what did I say about", recall stored info
-- comms_agent: Email, calendar, schedule, meeting, draft, inbox
-- system_agent: Battery, system info, storage, RAM, CPU, open app, screenshot, dark mode, volume, brightness, running processes, PDF
-- household_agent: TV, smart home, Netflix, YouTube, volume on TV
+- memory_agent: ONLY for explicit memory requests — "remember this", "what did I say about", "recall X". NOT for action commands
+- comms_agent: Email, calendar, schedule, meeting, draft, inbox, iMessage, text message, FaceTime call, contacts, WhatsApp messages
+- system_agent: Battery, system info, storage, RAM, CPU, open app, screenshot, dark mode, volume, brightness, running processes, PDF, screen vision, OCR, "what's on my screen", "can you see what I'm doing", "fill the form", "fill in the form", "complete this form"
+- household_agent: TV control — volume, mute, power on/off, launch apps (Netflix, YouTube, Spotify, Disney+), pause/play, screen off, smart home. ANY request involving the TV
 - monitor_agent: Track URL changes, watch for updates, alerts
 - briefing_agent: "Catch me up", morning brief, "any updates", "did anyone call"
-- job_agent: CV, resume, cover letter, job application, tailor CV
+- cron_agent: Schedule/cron tasks — "every weekday at 8am", "set up a recurring task", "list my crons", "delete cron"
+- job_agent: CV, resume, cover letter, job application, tailor CV, "look at this job posting", "apply for this", "find jobs I qualify for", "read the job on my screen and apply"
 - social_agent: X/Twitter — tweet, post, mentions, search X, @username, trending
+- deep_research_agent: Deep research, research paper, detailed report, comprehensive analysis, "write a paper on", "deep dive into", "research and save"
 - CHAT: Casual conversation, greetings, opinions, banter, meta-questions about yourself ("what are you doing", "how are you", "who are you")
 
 IMPORTANT: Questions about the user's DEVICE (battery, storage, CPU, RAM) → system_agent, NOT research_agent.
 IMPORTANT: Questions about YOU or casual chat ("what are you doing", "what's up") → CHAT, NOT research_agent.
+IMPORTANT: Anything about TV volume, TV control, turning TV on/off, launching apps on TV → household_agent, NOT memory_agent.
+IMPORTANT: Short confirmations like "yes", "go ahead", "do it", "proceed" — look at the conversation context. If the previous exchange was an agent asking for confirmation to continue a task, route to THAT SAME agent. Don't treat confirmations as casual chat.
 
 Respond with ONLY the agent name or "CHAT". Nothing else.
 Current time: {time}"""
@@ -69,7 +73,7 @@ def classify_intent(
         valid_agents = {
             "code_agent", "research_agent", "memory_agent", "comms_agent",
             "system_agent", "household_agent", "monitor_agent", "briefing_agent",
-            "job_agent", "social_agent",
+            "job_agent", "social_agent", "cron_agent", "deep_research_agent",
         }
 
         if text in valid_agents:
@@ -113,7 +117,8 @@ def match_agent(
         is_continuation = re.match(
             r"^(and |also |more |tell me more|dig into|dig deeper|"
             r"elaborate|expand|gimme more|what else|anything else|"
-            r"go on|keep going|continue)\b", s
+            r"go on|keep going|continue|another|try again|"
+            r"look up another|different|other)\b", s
         )
         if (has_reference or is_continuation) and len(s) < 80:
             has_override = any(re.search(p, s) for p in [
@@ -130,7 +135,7 @@ def match_agent(
             if not has_override and recent_agent not in HEAVY_AGENTS:
                 return (recent_agent, raw)
 
-    # ── Comms (email + calendar) ──
+    # ── Comms (email + calendar + iMessage + FaceTime) ──
     comms_patterns = [
         r"\b(email|emails|inbox|gmail|unread)\b",
         r"\b(my |the |any )?(mail|mails)\b",
@@ -143,15 +148,42 @@ def match_agent(
         r"\bwhat('?s| is) (on |in )?(my )?(calendar|schedule|inbox|mail)\b",
         r"\b(can you |)(read|check|show|get) (my |the )?(mail|email|inbox|calendar)\b",
         r"\bany (new |unread |recent )?(mail|email|message)s?\b",
+        # iMessage — send
+        r"\b(text|imessage|iMessage)\s+\S",
+        r"\b(send|shoot)\s+(a |an |)?(text|message|imessage|iMessage)\b",
+        r"\b(message|text)\s+.+\s+(saying|that says|and say|and tell)\b",
+        # iMessage — read / reply
+        r"\b(check|read|show|get)\s+(my |the )?(messages|texts|imessages|iMessages)\b",
+        r"\b(any |)(new |recent |unread )?(messages|texts|imessages)\b",
+        r"\bwhat did .+ (say|send|text|message)\b",
+        r"\breply\s+to\s+\S",
+        r"\brespond\s+to\s+\S",
+        # WhatsApp
+        r"\b(whatsapp|whats\s*app|wa)\s+(message|text|send|check|read)\b",
+        r"\b(send|text|message)\s+.+\s+(on |via |through )?(whatsapp|wa)\b",
+        r"\b(check|read|show|get)\s+(my |the )?(whatsapp|wa)\b",
+        r"\bwhatsapp\b",
+        # FaceTime
+        r"\b(facetime|face\s*time)\s+\S",
+        r"\b(call|ring|phone)\s+\S.+\b(on )?(facetime|face\s*time)\b",
+        r"\b(facetime|face\s*time)\s+(call|audio)\b",
+        # Contacts
+        r"\b(find|look\s*up|get|what'?s)\s+.+('s |s )?(number|phone|contact)\b",
+        r"\b(who is|look up)\s+.+\s+in\s+(my )?(contacts)\b",
     ]
     if any(re.search(p, s) for p in comms_patterns):
         return ("comms_agent", raw)
 
     # Follow-up comms
     followup_patterns = [
-        r"^send (it|that|the draft)[\s!?.]*$",
-        r"^draft (it|that)[\s!?.]*$",
-        r"^(yes |yeah |yep |ok )?(send|draft|mail) (it|that)[\s!?.]*$",
+        r"^send (it|that|the draft)",
+        r"^draft (it|that)",
+        r"^(yes |yeah |yep |ok )?(send|draft|mail) (it|that)",
+        r"\bsend it+\b",  # "send itttt"
+        r"^draft .+ and send",
+        r"^send .+ to ",  # "send something to X"
+        r"\bidentify yourself\b",
+        r"\btell (him|her|them) ",
     ]
     if any(re.search(p, s) for p in followup_patterns) and recent_comms_context(conversation):
         return ("comms_agent", raw)
@@ -217,9 +249,81 @@ def match_agent(
         r"\bhelp me (apply|get a job|with my application)\b",
         r"\bapply.+(all|every|each).+(role|job|position|opening)\b",
         r"\bfind.+(job|role|position)s?\s+(for me|i qualify|that match)\b",
+        r"\b(look at|read).+(screen|page).+(cv|resume|cover letter|apply|job)\b",
+        r"\b(cv|resume|cover letter|apply|job).+(screen|page|on my|i'?m on)\b",
+        r"\b(open|go to).+(career|job|hiring|vacancy|vacancies)\b",
+        r"\bcareer\s*(page|section|link|site)\b",
     ]
     if any(re.search(p, s) for p in job_patterns):
         return ("job_agent", raw)
+
+    # ── Watch tasks (standing orders) ──
+    watch_patterns = [
+        r"\b(watch|monitor|keep an eye on)\s+.+(message|text|email|inbox).+(for the next|for \d+|every)\b",
+        r"\bfor the next\s+\d+\s*(hour|min|minute).+(check|watch|monitor|reply|respond)\b",
+        r"\b(check|watch)\s+.+(every|each)\s+\d+\s*(min|minute|second)\b",
+        r"\b(if|when)\s+.+(new message|texts?|emails?)\s+(come|comes|arrive).+(reply|respond|let me know|ping me)\b",
+        r"\b(auto.?reply|auto.?respond)\b",
+        r"\bstanding order\b",
+        r"\b(cancel|stop|end)\s+(the |my )?(watch|standing order)\b",
+        r"\bwhat('?s| am i|are you) watch(ing)?\b",
+    ]
+    if any(re.search(p, s) for p in watch_patterns):
+        return ("system_agent", raw)
+
+    # ── Cron / scheduled tasks ──
+    cron_patterns = [
+        r"\b(cron|crons|cronjob|cron job)\b",
+        r"\b(schedule|scheduled)\s+(a |the )?(task|job|cron|reminder)\b",
+        r"\b(every|each)\s+(day|weekday|morning|evening|monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|month|hour)\b.+(run|do|check|send|remind|brief)",
+        r"\b(list|show|delete|remove|pause|disable|enable)\s+(my |the |all )?(cron|crons|scheduled|recurring)\b",
+        r"\b(recurring|repeating)\s+(task|job|reminder)\b",
+        r"\bset up .+ (every|daily|weekly|monthly)\b",
+        r"\bremind me (every|daily|weekly)\b",
+    ]
+    if any(re.search(p, s) for p in cron_patterns):
+        return ("system_agent", raw)  # System agent handles cron management
+
+    # ── Deep research / multi-agent tasks — produces a deliverable (paper, report, file) ──
+    deep_research_patterns = [
+        r"\bdeep (research|dive|analysis)\b",
+        r"\b(research|write)\s+(a |the )?(paper|report|document|analysis|thesis)\b",
+        r"\bdetailed (research|report|analysis|paper)\b",
+        r"\bcomprehensive (research|report|analysis|overview)\b",
+        r"\b(research|investigate|analyze)\s+.{5,}\s+and\s+(save|write|create|make|build)\b",
+        r"\b(save|write)\s+(it |the result |the research )?(to|on|in)\s+(my )?(desktop|downloads|a file)\b",
+        r"\bwrite (me |)(a |the )?(research |)(paper|report|document|submission)\s+(about|on|for)\b",
+        r"\b(create|make|build)\s+(a |the )?(detailed|submission|research)[\s-]*(ready )?(paper|report|document|file)\b",
+        r"\bdo\s+(a |)(research|deep dive)\s+(about|on|into)\b",
+        r"\b(read|open)\s+.{3,}\s+(and |then )(research|improve|rewrite|upgrade)\b",
+        r"\bimprove\s+.{3,}\s+(to |)(research|paper|academic|submission)[\s-]*(paper |grade|ready|level)?\b",
+        r"\b(research|analyze)\s+.{5,}\s+(and |then )(create|write|save|build|make)\b",
+    ]
+    if any(re.search(p, s) for p in deep_research_patterns):
+        return ("deep_research_agent", raw)
+
+    # ── Screen vision / OCR — before research to catch "what's on my screen" etc. ──
+    screen_patterns = [
+        r"\bcan you see\b",
+        r"\blook at (my |the )?screen\b",
+        r"\bwhat('?s| is| do you) see\b",
+        r"\bwhat('?s| is) (on |this |that )(my )?screen\b",
+        r"\blook at this\b",
+        r"\bcheck (my |the )?screen\b",
+        r"\bwhat does this (mean|say|do)\b",
+        r"\bwhat language is this\b",
+        r"\bwhat (file|code|page|site|error|app) is\b",
+        r"\blook( at)? (right|here|this|that)\b",
+        r"\bread (my |the |what'?s on )?(the )?screen\b",
+        r"\bocr\b",
+        r"\bwhat am i (doing|looking at|working on)\b",
+        r"\bsolve.*(question|problem|quiz|exam|test|worksheet|assignment|exercise)",
+        r"\b(answer|solve|do).*(on|from|off) (my |the )?screen\b",
+        r"\bfull page\b.*\b(screen|capture|ocr|read)\b",
+        r"\b(screen|capture|read).*(full page|whole page|entire page|all of it)\b",
+    ]
+    if any(re.search(p, s) for p in screen_patterns):
+        return ("system_agent", raw)
 
     # ── Research (search, look up, google, find out) ──
     research_patterns = [
@@ -230,6 +334,17 @@ def match_agent(
     ]
     if any(re.search(p, s) for p in research_patterns):
         return ("research_agent", raw)
+
+    # ── Form filling (generic — "fill the form on my screen") ──
+    form_patterns = [
+        r"\bfill\s+(the |this |that |in )?(the )?(form|fields|application)\b",
+        r"\bfill\s+(it |them |everything )?(in|out)\b",
+        r"\bcomplete\s+(the |this |that )?(form|fields|application)\b",
+        r"\bsubmit\s+(the |this |that )?(form|application)\b",
+        r"\bfill\s+out\s+(the |this |that )?(form|page|application)\b",
+    ]
+    if any(re.search(p, s) for p in form_patterns):
+        return ("system_agent", raw)
 
     # ── System (apps, screenshots, volume, dark mode, battery, browser, PDF) ──
     system_patterns = [
@@ -288,7 +403,9 @@ def recent_agent_context(conversation: list[dict], memory=None) -> str | None:
         pass
 
     social_kw = {"tweet", "twitter", "x.com", "@", "mention", "retweet", "post on x"}
-    comms_kw = {"email", "gmail", "inbox", "calendar", "draft", "send email"}
+    comms_kw = {"email", "gmail", "inbox", "calendar", "draft", "send email", "imessage", "text", "facetime", "message", "whatsapp"}
+    system_kw = {"fill form", "fill the form", "browser_fill_form", "browser_discover_form",
+                 "screenshot", "dark mode", "system info", "open app", "run command"}
 
     for msg in reversed(conversation[-6:]):
         content = msg.get("content", "").lower()
@@ -296,6 +413,8 @@ def recent_agent_context(conversation: list[dict], memory=None) -> str | None:
             return "social_agent"
         if any(kw in content for kw in comms_kw):
             return "comms_agent"
+        if any(kw in content for kw in system_kw):
+            return "system_agent"
 
     return None
 
@@ -333,8 +452,8 @@ def is_likely_chat(s: str) -> bool:
     """Quick check: is this casual chat vs a task that needs routing?"""
     task_signals = [
         r"\b(search|find|look up|check|get|fetch|pull|show|list)\b",
-        r"\b(send|draft|write|create|make|build|fix|update|delete)\b",
-        r"\b(email|calendar|tweet|post|monitor|watch|track)\b",
+        r"\b(send|draft|write|create|make|build|fix|update|delete|text|message)\b",
+        r"\b(email|calendar|tweet|post|monitor|watch|track|facetime|imessage|call)\b",
         r"\b(turn|switch|open|close|volume|brightness|screenshot)\b",
         r"\b(cv|resume|cover letter|apply|job)\b",
         r"\b(remember|recall|what did|catch me up)\b",
@@ -350,7 +469,7 @@ def needs_agent(user_input: str, conversation: list[dict]) -> bool:
     """Quick check: does this input likely need agent dispatch?"""
     stripped = user_input.strip().lower()
 
-    # Email/calendar always dispatch
+    # Email/calendar/iMessage/FaceTime always dispatch
     comms_patterns = [
         r"\b(email|emails|inbox|gmail|unread)\b",
         r"\b(my |the |any )?(mail|mails)\b",
@@ -363,6 +482,16 @@ def needs_agent(user_input: str, conversation: list[dict]) -> bool:
         r"\bwhat('?s| is) (on |in )?(my )?(calendar|schedule|inbox|mail)\b",
         r"\b(can you |)(read|check|show|get) (my |the )?(mail|email|inbox|calendar)\b",
         r"\bany (new |unread |recent )?(mail|email|message)s?\b",
+        # iMessage + FaceTime
+        r"\b(text|imessage|iMessage)\s+\S",
+        r"\b(send|shoot)\s+(a |an |)?(text|message|imessage|iMessage)\b",
+        r"\b(check|read|show|get)\s+(my |the )?(messages|texts|imessages)\b",
+        r"\bwhat did .+ (say|send|text|message)\b",
+        r"\breply\s+to\s+\S",
+        r"\brespond\s+to\s+\S",
+        r"\b(facetime|face\s*time)\s+\S",
+        r"\b(call|ring|phone)\s+\S.+\b(facetime|face\s*time)\b",
+        r"\b(find|look\s*up|get)\s+.+('s |s )?(number|phone|contact)\b",
     ]
     if any(re.search(p, stripped) for p in comms_patterns):
         return True
@@ -449,6 +578,29 @@ def needs_agent(user_input: str, conversation: list[dict]) -> bool:
     if any(re.search(p, stripped) for p in social_patterns):
         return True
 
+    # Watch tasks (standing orders)
+    watch_patterns = [
+        r"\b(watch|monitor|keep an eye on)\s+.+(message|text|email|inbox).+(for the next|for \d+|every)\b",
+        r"\bfor the next\s+\d+\s*(hour|min|minute).+(check|watch|monitor|reply|respond)\b",
+        r"\b(auto.?reply|auto.?respond)\b",
+        r"\bstanding order\b",
+    ]
+    if any(re.search(p, stripped) for p in watch_patterns):
+        return True
+
+    # Cron / scheduled tasks
+    cron_patterns = [
+        r"\b(cron|crons|cronjob|cron job)\b",
+        r"\b(schedule|scheduled)\s+(a |the )?(task|job|cron|reminder)\b",
+        r"\b(every|each)\s+(day|weekday|morning|evening|monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|month|hour)\b.+(run|do|check|send|remind|brief)",
+        r"\b(list|show|delete|remove|pause|disable|enable)\s+(my |the |all )?(cron|crons|scheduled|recurring)\b",
+        r"\b(recurring|repeating)\s+(task|job|reminder)\b",
+        r"\bset up .+ (every|daily|weekly|monthly)\b",
+        r"\bremind me (every|daily|weekly)\b",
+    ]
+    if any(re.search(p, stripped) for p in cron_patterns):
+        return True
+
     briefing_patterns = [
         r"\b(brief|briefing|debrief)\b",
         r"\bwhat did (i|we) miss\b",
@@ -463,6 +615,35 @@ def needs_agent(user_input: str, conversation: list[dict]) -> bool:
         r"\b(phone|facetime)\s+(log|history|calls?)\b",
     ]
     if any(re.search(p, stripped) for p in briefing_patterns):
+        return True
+
+    # Deep research / multi-agent tasks
+    deep_patterns = [
+        r"\bdeep (research|dive|analysis)\b",
+        r"\b(research|write)\s+(a |the )?(paper|report|document|analysis|thesis)\b",
+        r"\bdetailed (research|report|analysis|paper)\b",
+        r"\bcomprehensive (research|report|analysis|overview)\b",
+        r"\b(research|investigate|analyze)\s+.{5,}\s+and\s+(save|write|create|build)\b",
+        r"\b(create|make|build)\s+(a |the )?(detailed|submission|research)[\s-]*(ready )?(paper|report|document|file)\b",
+        r"\bdo\s+(a |)(research|deep dive)\b",
+        r"\b(read|open)\s+.{3,}\s+(and |then )(research|improve|rewrite)\b",
+    ]
+    if any(re.search(p, stripped) for p in deep_patterns):
+        return True
+
+    # Screen vision / OCR
+    screen_patterns = [
+        r"\bcan you see\b",
+        r"\blook at (my |the )?screen\b",
+        r"\bwhat('?s| is| do you) see\b",
+        r"\blook at this\b",
+        r"\bcheck (my |the )?screen\b",
+        r"\bwhat does this (mean|say|do)\b",
+        r"\bwhat am i (doing|looking at|working on)\b",
+        r"\bread (my |the )?screen\b",
+        r"\bocr\b",
+    ]
+    if any(re.search(p, stripped) for p in screen_patterns):
         return True
 
     # System control
@@ -516,7 +697,7 @@ def needs_agent(user_input: str, conversation: list[dict]) -> bool:
 
 def recent_comms_context(conversation: list[dict]) -> bool:
     """Check if recent conversation involved email/calendar (last 6 messages)."""
-    comms_keywords = {"email", "mail", "draft", "send", "calendar", "schedule", "inbox", "gmail"}
+    comms_keywords = {"email", "mail", "draft", "send", "calendar", "schedule", "inbox", "gmail", "imessage", "text", "facetime", "message"}
     for msg in conversation[-6:]:
         content = msg.get("content", "").lower()
         if any(kw in content for kw in comms_keywords):

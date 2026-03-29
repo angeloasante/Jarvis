@@ -33,9 +33,8 @@ KOKORO_SPEED = 1.0
 # Ambient listening
 TRIGGER_WORDS = ["friday"]              # Words that activate FRIDAY in ambient mode
 TRANSCRIPT_BUFFER_SECONDS = 300         # 5 minutes of rolling context
+FOLLOWUP_WINDOW_S = 8                   # Seconds after response to accept follow-ups without trigger word
 
-# Response filter
-MAX_VOICE_SENTENCES = 3     # Max sentences to speak aloud
 
 # Chime
 CHIME_FREQ = 880            # Hz — A5 note

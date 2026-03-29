@@ -10,6 +10,7 @@ import json as _json
 from friday.core.llm import cloud_chat, extract_stream_content
 from friday.core.prompts import PERSONALITY_SLIM
 from friday.core.router import extract_topic_from_conversation
+from friday.memory.conversation_log import log_turn
 
 
 async def try_oneshot(
@@ -249,6 +250,7 @@ def _oneshot_instant(
             args={"task": user_input}, result_summary=response_text[:200],
             success=True, duration_ms=0,
         )
+    log_turn(session_id, user_input, response_text, route="oneshot_instant", agent_name=agent_name)
     return True
 
 
@@ -309,6 +311,7 @@ async def _oneshot_format(
             success=True,
             duration_ms=0,
         )
+    log_turn(session_id, user_input, response_text, route="oneshot", agent_name=agent_name)
     if mem_processor:
         mem_processor.process(user_input, response_text, agent_name)
     return True

@@ -278,6 +278,52 @@ async def search_files(
         return ToolResult(success=False, data=str(e))
 
 
+async def convert_file_format(
+    path: str,
+    target_format: str,
+) -> ToolResult:
+    """Convert a file to another format (docx, md, txt, pdf)."""
+    try:
+        from friday.agents.deep_research_agent import convert_file, SUPPORTED_FORMATS
+        target_format = target_format.lower().strip(".")
+        if target_format not in SUPPORTED_FORMATS:
+            return ToolResult(
+                success=False,
+                error=ToolError(
+                    code=ErrorCode.INVALID_INPUT,
+                    message=f"Unsupported format: {target_format}. Supported: {', '.join(SUPPORTED_FORMATS)}",
+                    severity=Severity.LOW,
+                    recoverable=True,
+                ),
+            )
+        dest = convert_file(path, target_format)
+        return ToolResult(
+            success=True,
+            data=f"Converted to {dest}",
+            metadata={"source": path, "destination": str(dest), "format": target_format},
+        )
+    except FileNotFoundError as e:
+        return ToolResult(
+            success=False,
+            error=ToolError(
+                code=ErrorCode.FILE_NOT_FOUND,
+                message=str(e),
+                severity=Severity.MEDIUM,
+                recoverable=False,
+            ),
+        )
+    except Exception as e:
+        return ToolResult(
+            success=False,
+            error=ToolError(
+                code=ErrorCode.COMMAND_FAILED,
+                message=str(e),
+                severity=Severity.MEDIUM,
+                recoverable=False,
+            ),
+        )
+
+
 # ── Tool Schemas ─────────────────────────────────────────────────────────────
 
 TOOL_SCHEMAS = {
@@ -364,6 +410,28 @@ TOOL_SCHEMAS = {
                         "max_results": {"type": "integer", "description": "Max results (default 20)"},
                     },
                     "required": ["directory", "query"],
+                },
+            },
+        },
+    },
+    "convert_file": {
+        "fn": convert_file_format,
+        "schema": {
+            "type": "function",
+            "function": {
+                "name": "convert_file",
+                "description": "Convert a file to another format. Supports: docx, md, txt, pdf.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to the source file"},
+                        "target_format": {
+                            "type": "string",
+                            "enum": ["docx", "md", "txt", "pdf"],
+                            "description": "Target format to convert to",
+                        },
+                    },
+                    "required": ["path", "target_format"],
                 },
             },
         },

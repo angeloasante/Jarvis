@@ -105,7 +105,12 @@ class Speaker:
                 self._speak_cloud(text)
                 return
             except Exception as e:
-                logger.debug(f"ElevenLabs failed ({type(e).__name__}: {e}), falling back to Kokoro")
+                logger.warning(f"ElevenLabs failed ({type(e).__name__}: {e}), falling back to Kokoro")
+                # Recreate HTTP client — connection may be stale
+                try:
+                    self._init_http_client()
+                except Exception:
+                    pass
 
         self._speak_local(text)
 
@@ -137,7 +142,7 @@ class Speaker:
                 "xi-api-key": ELEVENLABS_API_KEY,
                 "Content-Type": "application/json",
             },
-            timeout=10.0,
+            timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0),
         )
 
     def _speak_cloud(self, text: str) -> None:
@@ -154,7 +159,7 @@ class Speaker:
         url = ELEVEN_API_URL.format(voice_id=ELEVENLABS_VOICE_ID)
 
         body = {
-            "text": text[:1000],
+            "text": text,
             "model_id": ELEVENLABS_MODEL,
         }
 
@@ -163,7 +168,7 @@ class Speaker:
 
         params = {
             "output_format": ELEVEN_OUTPUT_FORMAT,
-            "optimize_streaming_latency": "3",  # 0-4, prioritize speed over quality
+            "optimize_streaming_latency": "2",  # 0-4, 2 = good balance of speed + quality
         }
 
         self._playing = True
@@ -183,7 +188,7 @@ class Speaker:
                     channels=1,
                     dtype="int16",
                 ) as out_stream:
-                    for chunk in response.iter_bytes(chunk_size=4800):
+                    for chunk in response.iter_bytes(chunk_size=9600):
                         if self._interrupted:
                             break
                         if chunk:

@@ -29,9 +29,9 @@ from friday.voice.config import (
     CHIME_FREQ,
     CHIME_DURATION,
     CHIME_VOLUME,
-    MAX_VOICE_SENTENCES,
     TRANSCRIPT_BUFFER_SECONDS,
     TRIGGER_WORDS,
+    FOLLOWUP_WINDOW_S,
 )
 from friday.voice.tts import Speaker
 
@@ -132,6 +132,17 @@ def _is_noise_or_hallucination(text: str) -> bool:
     if len(words) == 2 and words[1] in _NOISE_WORDS:
         return True
 
+    # Repetitive word pattern: "audio audio audio", "hello hello hello"
+    if len(words) >= 3 and len(set(words)) == 1:
+        return True
+
+    # Mostly same word repeated: "Hello? F audio audio audio audio"
+    if len(words) >= 4:
+        from collections import Counter
+        most_common_count = Counter(words).most_common(1)[0][1]
+        if most_common_count >= len(words) * 0.6:
+            return True
+
     return False
 
 
@@ -166,7 +177,7 @@ class VoicePipeline:
         # Follow-up window — after FRIDAY responds, treat next speech as directed
         # at FRIDAY for N seconds without needing trigger word again
         self._last_response_time: float = 0.0
-        self._followup_window_s: float = 15.0
+        self._followup_window_s: float = FOLLOWUP_WINDOW_S
 
     # ── Public controls ──────────────────────────────────────────────────
 
@@ -311,7 +322,10 @@ class VoicePipeline:
         if duration_s < 0.5:
             return
 
+        t0 = time.time()
         text = self._stt.transcribe(full_audio)
+        stt_ms = (time.time() - t0) * 1000
+        console.print(f"  [dim]  ⏱ STT: {stt_ms:.0f}ms ({duration_s:.1f}s audio)[/dim]")
         self._handle_committed_text(text)
 
     # ══════════════════════════════════════════════════════════════════════
@@ -343,12 +357,14 @@ class VoicePipeline:
 
     def _on_followup(self, text: str):
         """Speech within follow-up window — treat as directed at FRIDAY."""
+        ambient_context = self._build_ambient_context()
         console.print(f"\n  [bold cyan]🎤 Travis:[/bold cyan] [cyan]{text}[/cyan]")
         _play_chime()
-        self._respond(text)
+        self._respond(text, ambient_context)
 
     def _respond(self, query: str, ambient_context: str = ""):
         """Send query to FRIDAY and speak the response."""
+        t_start = time.time()
         # Mute mic during response
         self._muted = True
         try:
@@ -362,17 +378,30 @@ class VoicePipeline:
                 )
 
             # Try fast path first
-            fast_result = asyncio.run_coroutine_threadsafe(
-                self.friday.fast_path(query), self.main_loop
-            ).result(timeout=15)
+            try:
+                fast_result = asyncio.run_coroutine_threadsafe(
+                    self.friday.fast_path(query), self.main_loop
+                ).result(timeout=15)
+            except Exception as e:
+                console.print(f"  [dim red]  ⏱ Fast path error: {e}[/dim red]")
+                fast_result = None
 
             if fast_result is not None:
+                fast_ms = (time.time() - t_start) * 1000
+                console.print(f"  [dim]  ⏱ Fast path: {fast_ms:.0f}ms[/dim]")
                 console.print(f"  [bold green]FRIDAY[/bold green] [green]{fast_result}[/green]")
                 console.print()
+                t_tts = time.time()
                 self._tts.speak(fast_result)
+                tts_ms = (time.time() - t_tts) * 1000
+                console.print(f"  [dim]  ⏱ TTS: {tts_ms:.0f}ms[/dim]")
             else:
-                self._process_and_speak(contextualized_query)
+                self._process_and_speak(contextualized_query, t_start)
+        except Exception as e:
+            console.print(f"  [red]✗ Voice response error: {e}[/red]")
         finally:
+            total_ms = (time.time() - t_start) * 1000
+            console.print(f"  [dim]  ⏱ Total: {total_ms:.0f}ms[/dim]")
             self._muted = False
             self._last_response_time = time.time()
 
@@ -396,16 +425,30 @@ class VoicePipeline:
     #  STREAMING TTS RESPONSE
     # ══════════════════════════════════════════════════════════════════════
 
-    def _process_and_speak(self, text: str):
-        """Dispatch to FridayCore and speak response sentence-by-sentence."""
+    def _process_and_speak(self, text: str, t_start: float = None):
+        """Stream LLM → TTS with minimal gaps.
+
+        Speaks each sentence as soon as it completes from the LLM stream.
+        While TTS plays a sentence, LLM chunks keep accumulating. When TTS
+        finishes, all accumulated complete sentences are batched into the
+        next TTS call. No dead air between sentences.
+        """
+        if t_start is None:
+            t_start = time.time()
+
         chunk_queue: queue.Queue = queue.Queue()
+        t_first_chunk = [None]
 
         def _on_update(msg: str):
             if msg.startswith("ACK:"):
-                console.print(f"  [dim green]◈ working on it...[/dim green]")
+                console.print(f"  [dim green]◈ thinking...[/dim green]")
             elif msg.startswith("STATUS:"):
                 console.print(f"  [dim green]  ◈ {msg[7:]}[/dim green]")
             elif msg.startswith("CHUNK:"):
+                if t_first_chunk[0] is None:
+                    t_first_chunk[0] = time.time()
+                    llm_ms = (t_first_chunk[0] - t_start) * 1000
+                    console.print(f"  [dim]  ⏱ LLM first chunk: {llm_ms:.0f}ms[/dim]")
                 chunk_queue.put(msg[6:])
             elif msg.startswith("DONE:"):
                 chunk_queue.put(_DONE)
@@ -416,69 +459,115 @@ class VoicePipeline:
         self.friday.dispatch_background(text, on_update=_on_update)
 
         sentence_buffer = ""
-        sentences_spoken = 0
         full_chunks: list[str] = []
         header_printed = False
+        llm_done = False
+        tts_count = 0
 
-        while True:
+        def _drain_available():
+            """Read all immediately available chunks from queue (non-blocking)."""
+            nonlocal sentence_buffer, llm_done
+            while True:
+                try:
+                    item = chunk_queue.get_nowait()
+                    if item is _DONE:
+                        llm_done = True
+                        return
+                    if isinstance(item, Exception):
+                        console.print(f"  [red]✗ LLM error: {item}[/red]")
+                        llm_done = True
+                        return
+                    full_chunks.append(item)
+                    sentence_buffer += item
+                except queue.Empty:
+                    return
+
+        def _extract_sentences() -> list[str]:
+            """Pull all complete sentences from buffer."""
+            nonlocal sentence_buffer
+            sentences = []
+            while SENTENCE_END_RE.search(sentence_buffer):
+                m = SENTENCE_END_RE.search(sentence_buffer)
+                raw = sentence_buffer[:m.end()].strip()
+                sentence_buffer = sentence_buffer[m.end():]
+                clean = _strip_for_voice(raw)
+                if clean and len(clean) >= 3 and not raw.strip().startswith("```"):
+                    sentences.append(clean)
+            return sentences
+
+        def _speak_batch(sentences: list[str]):
+            """Speak a batch of sentences as one TTS call."""
+            nonlocal header_printed, tts_count
+            if not sentences or self._tts._interrupted:
+                return
+            batch = " ".join(sentences)
+            if not batch.strip():
+                return
+            if not header_printed:
+                console.print(f"  [bold green]FRIDAY[/bold green] ", end="")
+                header_printed = True
+
+            t_tts = time.time()
+            if tts_count == 0:
+                voice_delay_ms = (t_tts - t_start) * 1000
+                console.print(f"  [dim]  ⏱ Voice delay: {voice_delay_ms:.0f}ms[/dim]")
+
+            self._tts.speak(batch)
+            tts_ms = (time.time() - t_tts) * 1000
+            tts_count += 1
+            console.print(f"  [dim]  ⏱ TTS #{tts_count} ({len(batch)} chars): {tts_ms:.0f}ms[/dim]")
+
+        # ── Main loop: read chunks → extract sentences → speak → repeat ──
+        while not llm_done:
+            # Check if buffer already has complete sentences (from previous drain)
+            sentences = _extract_sentences()
+            if sentences:
+                _speak_batch(sentences)
+                if self._tts._interrupted:
+                    self._drain_queue(chunk_queue, full_chunks)
+                    break
+                # While TTS was playing, more chunks arrived — drain them
+                _drain_available()
+                continue
+
+            # No sentences ready — wait for next chunk (blocking)
             try:
                 item = chunk_queue.get(timeout=120)
             except queue.Empty:
                 console.print("  [red]✗ Voice timeout — no response[/red]")
                 break
-
             if item is _DONE:
+                llm_done = True
                 break
             if isinstance(item, Exception):
                 console.print(f"  [red]✗ Error: {item}[/red]")
                 break
-
             full_chunks.append(item)
             sentence_buffer += item
 
-            while SENTENCE_END_RE.search(sentence_buffer):
-                match = SENTENCE_END_RE.search(sentence_buffer)
-                sentence = sentence_buffer[:match.end()].strip()
-                sentence_buffer = sentence_buffer[match.end():]
-
-                if sentences_spoken >= MAX_VOICE_SENTENCES:
-                    continue
-
-                clean = _strip_for_voice(sentence)
-                if not clean or len(clean) < 3 or sentence.strip().startswith("```"):
-                    continue
-
-                if not header_printed:
-                    console.print(f"  [bold green]FRIDAY[/bold green] ", end="")
-                    header_printed = True
-
-                self._tts.speak(clean)
-                sentences_spoken += 1
-
-                if self._tts._interrupted:
-                    self._drain_queue(chunk_queue, full_chunks)
-                    break
-
-            if self._tts._interrupted:
-                break
-
-        # Speak remaining buffer
-        if (sentence_buffer.strip()
-            and sentences_spoken < MAX_VOICE_SENTENCES
-            and not self._tts._interrupted):
-            clean = _strip_for_voice(sentence_buffer)
-            if clean and len(clean) >= 3 and not sentence_buffer.strip().startswith("```"):
-                if not header_printed:
-                    console.print(f"  [bold green]FRIDAY[/bold green] ", end="")
-                    header_printed = True
-                self._tts.speak(clean)
-
+        # ── Final: speak any leftover text ──
         full_text = "".join(full_chunks)
-        if full_text:
+        llm_ms = (time.time() - t_start) * 1000
+        console.print(f"  [dim]  ⏱ LLM done: {llm_ms:.0f}ms | {len(full_text)} chars[/dim]")
+
+        remaining = _strip_for_voice(sentence_buffer)
+        if remaining and len(remaining) >= 3 and not self._tts._interrupted:
+            _speak_batch([remaining])
+
+        # If nothing was spoken at all (no sentence boundaries found)
+        if tts_count == 0 and not self._tts._interrupted:
+            clean = _strip_for_voice(full_text)
+            if clean and len(clean) >= 3:
+                _speak_batch([clean])
+
+        # Print full text to CLI
+        if full_text.strip():
             if not header_printed:
                 console.print(f"  [bold green]FRIDAY[/bold green] ", end="")
             console.print(f"[green]{full_text}[/green]")
             console.print()
+        elif not full_text.strip():
+            console.print(f"  [red]✗ LLM returned empty response[/red]")
 
     @staticmethod
     def _drain_queue(q: queue.Queue, collect: list[str]):

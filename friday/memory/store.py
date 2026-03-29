@@ -116,6 +116,39 @@ class MemoryStore:
             CREATE INDEX IF NOT EXISTS idx_monitor_events_monitor ON monitor_events(monitor_id);
             CREATE INDEX IF NOT EXISTS idx_briefing_queue_delivered ON briefing_queue(delivered);
             CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
+
+            CREATE TABLE IF NOT EXISTS cron_jobs (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                schedule TEXT NOT NULL,
+                task TEXT NOT NULL,
+                channel TEXT DEFAULT 'cli',
+                enabled INTEGER DEFAULT 1,
+                last_run TEXT,
+                next_run TEXT,
+                run_count INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS heartbeat_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS watch_tasks (
+                id TEXT PRIMARY KEY,
+                instruction TEXT NOT NULL,
+                interval_seconds INTEGER NOT NULL DEFAULT 60,
+                expires_at TEXT,
+                last_check TEXT,
+                last_state TEXT,
+                active INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_cron_jobs_enabled ON cron_jobs(enabled);
+            CREATE INDEX IF NOT EXISTS idx_watch_tasks_active ON watch_tasks(active);
         """)
         self.db.commit()
 

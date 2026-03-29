@@ -24,7 +24,7 @@ USE_CLOUD = bool(CLOUD_API_KEY)
 # ElevenLabs TTS (cloud streaming voice)
 # Set ELEVENLABS_API_KEY in .env to enable. Falls back to local Kokoro if unset.
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")  # "George" — warm male
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb").strip("/")  # "George" — warm male
 ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5")  # ~75ms latency, best for real-time
 USE_CLOUD_TTS = bool(ELEVENLABS_API_KEY)
 

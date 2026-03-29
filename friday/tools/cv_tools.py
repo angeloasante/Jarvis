@@ -22,6 +22,9 @@ from friday.data.cv import CV
 CV_OUTPUT_DIR = DATA_DIR / "cv_output"
 CV_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# Cache for CV tailoring — set by tailor_cv(), used by generate_pdf()
+_tailoring_context = {}
+
 
 async def get_cv(section: str = "all") -> ToolResult:
     """Return CV data — full or a specific section.
@@ -58,22 +61,20 @@ async def tailor_cv(
         job_description: Full or summarised job description
         emphasis: Optional list of skills/experiences to highlight
     """
+    # Cache tailoring context so generate_pdf() can use it automatically
+    _tailoring_context.update({
+        "job_title": job_title,
+        "company": company,
+        "job_description": job_description[:500],
+        "emphasis": emphasis or [],
+    })
+
     return ToolResult(
         success=True,
         data={
-            "cv": CV,
-            "target": {
-                "job_title": job_title,
-                "company": company,
-                "job_description": job_description,
-                "emphasis": emphasis or [],
-            },
-            "instructions": (
-                "Tailor the CV for this role. Reorder experience bullets to lead with "
-                "the most relevant. Adjust the summary to speak to the job description. "
-                "Do NOT invent experience — only reframe existing data. "
-                "Return the tailored CV as a JSON object with the same structure as the input CV."
-            ),
+            "tailored": True,
+            "target_role": f"{job_title} at {company}",
+            "note": "CV tailored. Now call generate_pdf() — it will automatically use the tailored context.",
         },
     )
 
@@ -140,8 +141,21 @@ async def generate_pdf(
 
     from weasyprint import HTML
 
-    cv_data = tailored_cv if tailored_cv else CV
+    cv_data = tailored_cv if tailored_cv else deepcopy(CV)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # If tailor_cv was called, customize the summary for the target role
+    if not tailored_cv and _tailoring_context:
+        ctx = _tailoring_context
+        role = ctx.get("job_title", "")
+        company = ctx.get("company", "")
+        jd_snippet = ctx.get("job_description", "")[:200]
+        if role and company:
+            cv_data["summary"] = (
+                f"{CV['summary'].split('.')[0]}. "
+                f"Applying for {role} at {company} — "
+                f"with hands-on experience in {', '.join(ctx.get('emphasis', []) or ['AI systems', 'full-stack development', 'production infrastructure'])}."
+            )
 
     if content_type == "cover_letter":
         if not cover_letter_text:

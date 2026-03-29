@@ -12,6 +12,7 @@ import json as _json
 from datetime import datetime
 from friday.core.llm import cloud_chat, extract_tool_calls, extract_text, extract_stream_content
 from friday.core.types import ToolResult
+from friday.memory.conversation_log import log_turn
 
 # ── Slim prompt for tool selection ──────────────────────────────────────────
 
@@ -19,6 +20,9 @@ DISPATCH_PROMPT = """You are FRIDAY, Travis's AI assistant. Pick the right tool 
 Rules:
 - Call exactly ONE tool. Never two.
 - If the task needs multiple steps (e.g. read calendar THEN draft email, or search THEN post), respond with just: NEEDS_AGENT
+- IMPORTANT: Anything involving filling forms, completing forms, submitting applications, or interacting with browser forms is ALWAYS multi-step. Respond with: NEEDS_AGENT
+- IMPORTANT: Confirmations like "yes", "go ahead", "do it" that follow a previous agent task are continuations. Respond with: NEEDS_AGENT
+- IMPORTANT: "check messages" / "read messages" / "what did X say" = read_imessages. create_watch is ONLY for setting up recurring background monitoring ("watch X's messages for the next hour"). Don't confuse one-time reads with standing orders.
 - If it's casual chat, a greeting, or an opinion question with no factual answer, respond with just: NO_TOOL
 - IMPORTANT: If the recent conversation was about EMAILS (checking mail, order confirmations, email content), and the user asks a follow-up question about that content — use search_emails or read_emails to find the answer, NOT search_web. The answer is in the email, not on the web.
 - If the user asks a factual question NOT related to their emails/calendar (specs, features, people, events, how something works), use search_web to find the answer.
@@ -42,13 +46,24 @@ TOOL_NAMES = [
     # Communication — most common single-tool queries
     "read_emails", "search_emails", "draft_email",
     "get_calendar",
+    # iMessage + FaceTime
+    "read_imessages", "send_imessage", "start_facetime", "search_contacts",
+    # WhatsApp
+    "read_whatsapp", "send_whatsapp", "search_whatsapp", "whatsapp_status",
     # Social
     "search_x", "get_my_mentions",
     # Information
     "search_web",
     # Memory
     "store_memory", "search_memory",
-    # Note: system tools (screenshot, open, battery) already handled by oneshot regex.
+    # Cron management
+    "create_cron", "list_crons", "delete_cron", "toggle_cron",
+    # Watch tasks (standing orders)
+    "create_watch", "list_watches", "cancel_watch",
+    # Screen tools (OCR + vision + full page + solve + general read)
+    "ocr_screen", "ask_about_screen", "capture_full_page", "solve_screen_questions", "read_screen",
+    # File conversion
+    "convert_file",
     # Note: send_email, post_tweet excluded — usually need confirmation context.
     # Note: get_call_history, get_daily_digest excluded — briefing handles these.
 ]
@@ -69,9 +84,19 @@ def _build_tools():
     from friday.tools.memory_tools import TOOL_SCHEMAS as mem
     from friday.tools.file_tools import TOOL_SCHEMAS as files
     from friday.tools.briefing_tools import TOOL_SCHEMAS as brief
+    from friday.tools.imessage_tools import TOOL_SCHEMAS as imsg
+    from friday.tools.cron_tools import TOOL_SCHEMAS as cron
+    from friday.tools.watch_tools import TOOL_SCHEMAS as watch
+    from friday.tools.screen_tools import TOOL_SCHEMAS as screen
+
+    # WhatsApp — optional
+    try:
+        from friday.tools.whatsapp_tools import TOOL_SCHEMAS as wa
+    except Exception:
+        wa = {}
 
     all_schemas = {}
-    for src in [email, cal, calls, web, x, mac, mem, files, brief]:
+    for src in [email, cal, calls, web, x, mac, mem, files, brief, imsg, cron, watch, screen, wa]:
         all_schemas.update(src)
 
     DIRECT_TOOLS.update({n: all_schemas[n] for n in TOOL_NAMES if n in all_schemas})
@@ -115,6 +140,10 @@ async def try_direct_dispatch(
     if re.match(r"^(yo|hey|sup|hi|hello|hawfar|whats good|whats up|how are you|lol|haha|nah|yeah|ok|sure|thanks|cheers)\b", s):
         if word_count <= 8 and "?" not in user_input:
             return False
+
+    # Form filling is multi-step (discover → fill → verify) — needs agent, not single tool
+    if "fill" in s and ("form" in s or "field" in s or "application" in s):
+        return False
 
     # Build messages — slim prompt + conversation context
     now = datetime.now().strftime("%A %d %B %Y, %H:%M")
@@ -235,6 +264,7 @@ async def _format_and_stream(
             args={"task": user_input}, result_summary=response_text[:200],
             success=True, duration_ms=0,
         )
+    log_turn(session_id, user_input, response_text, route="direct_dispatch", tools_called=[tool_name])
     if mem_processor:
         mem_processor.process(user_input, response_text, "direct_dispatch")
 

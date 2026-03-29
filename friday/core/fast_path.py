@@ -170,4 +170,27 @@ async def match_fast(s: str):
             return f"TV is {d.get('power', 'on')}. Volume {d.get('volume', '?')}. {d.get('app', 'No app')} is open.", r
         return ("TV seems off or unreachable." if not r.success else "TV is on."), r
 
+    # ── FaceTime: "facetime mom" / "call john on facetime" ──
+    ft_match = re.match(
+        r"^(?:facetime|face\s*time)\s+(.+?)(?:\s+audio)?(?:\s+only)?\s*[.!]?$", s
+    )
+    if not ft_match:
+        ft_match = re.match(
+            r"^(?:call|ring|phone)\s+(.+?)\s+(?:on\s+)?(?:facetime|face\s*time)\s*[.!]?$", s
+        )
+    if ft_match:
+        from friday.tools.imessage_tools import start_facetime
+        recipient = ft_match.group(1).strip()
+        audio = "audio" in s
+        r = await start_facetime(recipient=recipient, audio_only=audio)
+        if r.success and r.data:
+            if r.data.get("needs_choice"):
+                # Multiple numbers — can't handle in fast path, fall through to agent
+                return None
+            name = r.data.get("recipient", recipient)
+            call_type = r.data.get("type", "FaceTime")
+            return f"Calling {name} on {call_type}.", r
+        err = r.error.message if r.error else "Couldn't start FaceTime."
+        return err, r
+
     return None

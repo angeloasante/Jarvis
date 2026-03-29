@@ -15,6 +15,8 @@ from prompt_toolkit.formatted_text import HTML
 from friday.core.orchestrator import FridayCore
 from friday.core.config import DATA_DIR
 from friday.background.monitor_scheduler import get_monitor_scheduler
+from friday.background.heartbeat import get_heartbeat_runner
+from friday.background.cron_scheduler import get_cron_scheduler
 
 
 console = Console()
@@ -59,10 +61,10 @@ def print_banner():
     console.print()
     console.print(Rule(style=G))
     console.print()
-    cmds = "  /quit [dim]exit[/dim]  |  /clear [dim]reset[/dim]  |  /memory [dim]recall[/dim]"
-    if not voice_flag:
-        cmds += "  |  /voice [dim]toggle[/dim]"
+    cmds = "  /quit [dim]exit[/dim]  |  /clear [dim]reset[/dim]  |  /memory [dim]recall[/dim]  |  /voice [dim]toggle[/dim]  |  /clearwatches [dim]kill all watches[/dim]"
     console.print(cmds, style=DG)
+    cmds2 = "  /listening-off [dim]pause mic[/dim]  |  /listening-on [dim]resume mic[/dim]"
+    console.print(cmds2, style=DG)
     console.print()
 
 
@@ -127,6 +129,22 @@ async def main():
         await scheduler.start()
     except Exception:
         pass  # Non-critical — FRIDAY works fine without monitors
+
+    # Start heartbeat (proactive background checks) — alerts go to phone + CLI
+    try:
+        from friday.tools.notify import notify_phone_async
+        heartbeat = get_heartbeat_runner(notify_fn=notify_phone_async)
+        await heartbeat.start()
+    except Exception:
+        pass  # Non-critical
+
+    # Start cron scheduler (user-defined scheduled tasks)
+    try:
+        from friday.tools.notify import notify_phone_async as _cron_notify
+        cron = get_cron_scheduler(notify_fn=_cron_notify)
+        await cron.start()
+    except Exception:
+        pass  # Non-critical
 
     # Sync GitHub projects in background
     try:
@@ -203,6 +221,15 @@ async def main():
                     console.print("  [bold green]:: Voice ON[/bold green]\n")
                 except Exception as e:
                     console.print(f"  [red]✗ Voice failed: {e}[/red]\n")
+            continue
+
+        if user_input == "/clearwatches":
+            from friday.memory.store import get_memory_store
+            db = get_memory_store().db
+            count = db.execute("SELECT COUNT(*) FROM watch_tasks WHERE active = 1").fetchone()[0]
+            db.execute("UPDATE watch_tasks SET active = 0 WHERE active = 1")
+            db.commit()
+            console.print(f"  [dim green]:: Cleared {count} active watch task(s)[/dim green]\n")
             continue
 
         if user_input == "/listening-off":

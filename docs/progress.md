@@ -72,16 +72,18 @@ Inspired by Tony Stark's JARVIS/FRIDAY. Not a chatbot. A co-founder, a 3am codin
   - `set_volume()` — system volume 0-100
   - `toggle_dark_mode()` — switch macOS dark/light mode
 - [x] **Browser Tools** (`friday/tools/browser_tools.py`)
-  - `browser_navigate()` — go to URL, returns title + status code + login detection
+  - `browser_navigate()` — go to URL, returns title + login detection
   - `browser_screenshot()` — capture page or element, saves to `~/Downloads/friday_screenshots/`
   - `browser_click()` — click elements with safety check for pay/delete/submit
   - `browser_fill()` — fill form fields
   - `browser_get_text()` — extract text content from page elements
   - `browser_wait_for_login()` — pause while Travis logs in manually, detects when login completes
-  - `browser_close()` — close browser, sessions are saved
-  - **Persistent browser profile** — uses real Chrome (`channel="chrome"`), cookies/sessions saved in `~/.friday/browser_data/`
+  - `browser_close()` — close browser
+  - **Default engine: Safari (Selenium)** — uses Travis's actual Safari with all existing cookies, sessions, saved passwords. No login walls. Modal, LinkedIn, Gmail — already logged in.
+  - **Fallback: Playwright Chromium** — if Safari remote automation not enabled, falls back to Chromium with persistent profile at `~/.friday/browser_data/`
+  - **Auto-detection** — `_detect_engine()` tries Safari first, caches result. Every tool function dispatches to the right engine.
   - **Login detection** — checks URL patterns and page content for login indicators, returns `login_required: true` flag
-  - Log in once, sessions persist across FRIDAY restarts
+  - Safari setup (one time): Safari → Settings → Advanced → Show features for web developers, then Develop → Allow Remote Automation
 - [x] **TV Tools** (`friday/tools/tv_tools.py`) — **18 tools, full WebOS command suite**
   - **Power**: `turn_on_tv()` (WakeOnLan), `turn_off_tv()` (WebOS SystemControl)
   - **Screen**: `tv_screen_off()` (audio keeps playing), `tv_screen_on()`
@@ -343,7 +345,7 @@ Inspired by Tony Stark's JARVIS/FRIDAY. Not a chatbot. A co-founder, a 3am codin
 | "send draft ID: X" doesn't work | No `send_draft` tool existed; agent tried `send_email` with wrong params | Created `send_draft()` and `edit_draft()` tools using Gmail Drafts API |
 | "send it" after discussing email doesn't route to comms | `needs_agent()` only matched "send an email" pattern, not follow-ups | Added follow-up patterns + `_recent_comms_context()` check for conversation-aware routing |
 | Browser screenshots a login page and calls it done | No login detection — agent takes screenshot of whatever page loads | Added `_detect_login_page()` (URL + content checks) + `browser_wait_for_login()` tool |
-| Browser sessions lost between runs | Fresh Playwright context each time — no cookies/sessions saved | Persistent browser profile at `~/.friday/browser_data/` with `channel="chrome"` |
+| Browser sessions lost between runs | Fresh Playwright context each time — no cookies/sessions saved | Switched to Safari (Selenium) as default — uses Travis's actual Safari sessions. Playwright fallback with persistent profile at `~/.friday/browser_data/` |
 | Screenshots saved to `/tmp/friday/` | Not user-accessible location | Changed to `~/Downloads/friday_screenshots/` for both mac and browser screenshots |
 | No smart home control | No household agent or TV tools | Built HouseholdAgent + tv_tools.py with 6 WebOS/WOL tools for LG TV |
 | Household agent "fakes" TV actions | LLM responds "Done!" without calling tools, or ignores tool failure results | Added verification (read-back) on volume/app launch; stronger prompt: "EVERY device action MUST be a tool call" |
@@ -989,6 +991,32 @@ To switch TTS: add or remove `ELEVENLABS_API_KEY` from `.env`. That's it.
 | `friday/cli.py` | Added `/listening-off` and `/listening-on` commands |
 | `pyproject.toml` | Added `websockets` dependency |
 
+### TTS Optimization — Hybrid Streaming Strategy (`pipeline.py`, `tts.py`)
+- [x] **Removed `MAX_VOICE_SENTENCES`** — was capping TTS at 3 sentences, silently cutting long responses. No sentence limit now.
+- [x] **Fixed text truncation** — `text[:1000]` in `_speak_cloud()` was silently cutting responses at 1000 chars. Removed the slice, full text sent to ElevenLabs.
+- [x] **Hybrid TTS strategy** — speak first complete sentence immediately for responsiveness (~0.5-1s to voice), collect remaining LLM output, batch into ONE TTS call. Previously each sentence was a separate HTTP request.
+- [x] **Gap timing instrumentation** — measures delay between first sentence TTS finishing and remaining text TTS starting.
+
+### Voice Pipeline Reliability (`pipeline.py`)
+- [x] **Error handling in `_respond()`** — try/except around fast_path and process_and_speak. Previously a timeout or error silently killed the response.
+- [x] **Follow-up window reduced to 8s** (was 15s) — configurable via `FOLLOWUP_WINDOW_S`. 15s was catching unrelated conversations.
+- [x] **Follow-up context injection** — `_on_followup()` now passes ambient context. Previously FRIDAY had no idea what the conversation was about during follow-ups.
+- [x] **Repetitive word hallucination filter** — catches "audio audio audio" style transcripts (60%+ same word = noise).
+- [x] **Comprehensive timing instrumentation** — STT duration, LLM first chunk, LLM done, voice delay, gap between TTS calls, TTS duration, total end-to-end.
+
+### LLM Routing Fix (`router.py`)
+- [x] **TV volume → memory_agent misroute** — LLM was sending "put my TV volume to 20%" to memory_agent instead of household_agent.
+- [x] **Expanded household_agent description** — now explicitly lists TV control, volume, mute, power, launch apps, pause/play, screen off, smart home.
+- [x] **Narrowed memory_agent description** — restricted to "ONLY for explicit memory requests" with explicit rule: "Anything about TV → household_agent, NOT memory_agent."
+
+### LLM Benchmarks (Groq — Qwen3-32B)
+```
+Short response:  1.0s / 53 chars   (~53 chars/sec)
+Medium response: 0.9s / 656 chars  (~729 chars/sec)
+Long response:   5.0s / 5212 chars (~1042 chars/sec)
+```
+Throughput scales well. First sentence available within ~0.5-1s for most responses.
+
 ### Bugs Found & Fixed
 
 | Bug | Root Cause | Fix |
@@ -998,9 +1026,349 @@ To switch TTS: add or remove `ELEVENLABS_API_KEY` from `.env`. That's it.
 | Cloud STT stuck for 2+ minutes | ElevenLabs Scribe WebSocket too slow/unreliable | Switched to always-local Silero VAD + MLX Whisper |
 | Music triggers VAD at threshold 0.5 | Silero VAD too sensitive for ambient noise | Raised `VAD_THRESHOLD` to 0.7, `VAD_MIN_SPEECH_MS` to 400 |
 | TTS slow — new HTTP connection per sentence | `httpx.stream()` creates new TCP connection each time | Persistent `httpx.Client` with keep-alive, reused across sentences |
-| "dig?" after FRIDAY response gets no reply | Follow-up speech needs trigger word "Friday" | 15-second follow-up window — any speech treated as directed at FRIDAY |
+| "dig?" after FRIDAY response gets no reply | Follow-up speech needs trigger word "Friday" | Follow-up window — any speech within 8s treated as directed at FRIDAY |
 | SQLite thread safety error in voice thread | Voice runs in separate thread from main | `check_same_thread=False` in sqlite3.connect() |
+| TTS cuts off long responses at ~4 sentences | `MAX_VOICE_SENTENCES = 3` capped output | Removed `MAX_VOICE_SENTENCES` entirely |
+| TTS silently truncates at 1000 chars | `text[:1000]` in `_speak_cloud()` | Removed the slice — full text sent to ElevenLabs |
+| No response / pipeline stuck after error | No exception handling in `_respond()` | Added try/except around fast_path and process_and_speak |
+| Follow-up has no context | `_on_followup()` didn't pass ambient context | Now calls `_build_ambient_context()` in follow-ups |
+| Follow-up catches unrelated conversations | 15s window too aggressive | Reduced to 8s, made configurable via `FOLLOWUP_WINDOW_S` |
+| "audio audio audio" passes hallucination filter | No repetitive word detection | 60%+ same word = noise |
+| TV volume routed to memory_agent | Vague household_agent LLM description | Expanded household_agent, narrowed memory_agent in classify prompt |
+| Sentence-by-sentence TTS = slow + gaps | Each sentence = separate ElevenLabs HTTP request | Hybrid: first sentence immediate, rest batched into ONE call |
 
 ---
 
-*Last updated: 2026-03-25*
+## Phase 4.5 — Autonomy: Heartbeat, Cron, iMessage, Notifications (COMPLETE)
+
+**Target:** FRIDAY becomes proactive — checks for things without being asked, runs scheduled tasks, communicates via iMessage, and pushes notifications to Travis's phone.
+
+### iMessage Integration (`friday/tools/imessage_tools.py`) — NEW FILE
+
+- [x] `read_imessages(contact, limit, search, direction)` — reads from macOS `chat.db` (SQLite)
+- [x] `send_imessage(recipient, message, confirm)` — sends via Messages.app AppleScript
+- [x] `start_facetime(recipient, audio_only)` — initiates FaceTime calls
+- [x] `search_contacts(name)` — Contacts.app AppleScript with fuzzy matching
+- [x] NSAttributedString parser — extracts text from `attributedBody` binary blobs (newer iMessage format)
+- [x] Smart contact resolution — `_best_contact_match()` with word-overlap scoring, name-length tiebreaker
+- [x] Multi-number handling — `_resolve_all_numbers()` returns all phone numbers for a contact
+- [x] Direction filtering — `direction="sent"` or `direction="received"` for filtering messages
+- [x] Attachment type detection — camera, screen, audio, location, contact, link, generic file
+- [x] Nickname/emoji support — "Ellen's pap😩", "My Bby💐🖤", curly apostrophe handling
+- [x] Auto-launch Contacts.app via `open -a Contacts -g` + retry logic
+
+### Comms Agent Updates (`friday/agents/comms_agent.py`)
+
+- [x] Added iMessage + FaceTime tools to agent toolset
+- [x] Channel detection rules — after reading iMessages, replies go via `send_imessage` (never `draft_email`)
+- [x] "You" interpretation — "building you" = FRIDAY, not the message recipient
+- [x] Contact facts embedded in system prompt — "Father In Law" / "Ellen's Pap" = Ellen (she/her)
+- [x] Drafting style instructions — read conversation first (limit=20+), match tone/slang/vibe
+- [x] Exact contact name passthrough — never shorten or simplify names
+- [x] Rules reinforced at top AND bottom of prompt (primacy + recency effects)
+
+### Heartbeat System (`friday/background/heartbeat.py`) — NEW FILE
+
+- [x] `HeartbeatRunner` — proactive background awareness loop
+- [x] Configurable via `~/.friday/HEARTBEAT.md` — plain English, re-read on every tick
+- [x] Default: check every 30 minutes
+- [x] Zero-LLM silent ticks — runs direct tool calls (read_emails, check briefing_queue)
+- [x] 1 LLM call only when something needs attention (synthesis)
+- [x] Quiet hours (1am-7am) — no alerts
+- [x] Daily alert cap (3/day) — prevents notification fatigue
+- [x] Morning briefing trigger (8am weekdays) — auto-fires once per day
+- [x] `heartbeat_state` SQLite table for daily counters and briefing tracking
+- [x] Singleton pattern with `get_heartbeat_runner()`
+- [x] `notify_fn` callback — pluggable output (CLI, iMessage, future: APNs)
+
+### Cron Scheduler (`friday/background/cron_scheduler.py`) — NEW FILE
+
+- [x] `CronScheduler` — user-defined scheduled tasks backed by APScheduler + SQLite
+- [x] Standard 5-field cron expressions (`0 8 * * 1-5` = weekdays 8am)
+- [x] `cron_jobs` SQLite table — persistent across restarts
+- [x] CRUD: create, list, delete, toggle (enable/disable)
+- [x] Cron validation — rejects invalid expressions with clear error
+- [x] `execute_fn` callback — fires task through orchestrator (full LLM processing)
+- [x] Run count and last_run tracking
+- [x] Singleton pattern with `get_cron_scheduler()`
+
+### Cron Tools (`friday/tools/cron_tools.py`) — NEW FILE
+
+- [x] `create_cron(name, schedule, task, channel)` — creates a scheduled job
+- [x] `list_crons()` — lists all jobs with status
+- [x] `delete_cron(job_id)` — removes a job
+- [x] `toggle_cron(job_id, enabled)` — enable/disable without deleting
+- [x] Registered in direct dispatch (tool_dispatch.py) — LLM can pick these in 1 call
+- [x] Schema includes examples of cron expressions for LLM guidance
+
+### Phone Notifications (`friday/tools/notify.py`) — NEW FILE
+
+- [x] `send_phone_notification(title, body, priority)` — sends iMessage to Travis's own number
+- [x] Priority-based emoji prefixes: 🚨 critical, ⚠️ high, 🔔 normal, 💬 low
+- [x] `notify_phone_async(text)` — async wrapper for heartbeat/cron callbacks
+- [x] Auto-splits text into title + body
+- [x] Prints to CLI + sends to phone simultaneously
+- [x] DND bypass: add own number to Focus > People > Allow Notifications From
+
+### Routing Updates (`friday/core/router.py`)
+
+- [x] Added iMessage read/reply patterns to `match_agent()` and `needs_agent()`
+- [x] Added cron patterns: "every weekday at 8am", "list my crons", "schedule a task"
+- [x] Added continuation patterns: "another", "try again", "different", "other"
+- [x] Broadened follow-up comms: "send itttt", "identify yourself", "tell him/her/them"
+- [x] Added `cron_agent` to LLM classify valid agents
+
+### CLI Boot Sequence (`friday/cli.py`)
+
+- [x] Heartbeat starts on boot with phone notification callback
+- [x] Cron scheduler starts on boot with phone notification callback
+- [x] Both non-critical — FRIDAY works fine if they fail to start
+
+### DB Schema (`friday/memory/store.py`)
+
+- [x] `cron_jobs` table — id, name, schedule, task, channel, enabled, last_run, next_run, run_count
+- [x] `heartbeat_state` table — key-value store for daily counters, briefing state
+
+### Watch Tasks / Standing Orders (`friday/tools/watch_tools.py`) — NEW FILE
+
+- [x] `create_watch(instruction, interval_seconds, duration_minutes)` — creates a background watch task
+- [x] `list_watches()` — lists all active standing orders
+- [x] `cancel_watch(task_id)` — cancels a watch by ID
+- [x] `watch_tasks` SQLite table — id, instruction, interval_seconds, expires_at, last_check, last_state, active
+- [x] Registered in direct dispatch — LLM picks these in 1 call from conversation
+
+### Watch Task Execution (`friday/background/heartbeat.py`)
+
+- [x] Watch runner ticks every 30 seconds, checks if any task is due
+- [x] Contact extraction from natural language — "messages from X", "X's messages", "watch X messages", "reply to X"
+- [x] Fingerprint comparison — `date|text[:100]` prevents double-replying to the same message
+- [x] Baseline-first — first tick records current state without replying (no phantom messages on creation)
+- [x] Already-replied detection — checks if the newest overall message is from Travis (direction=sent)
+- [x] **LLM reasoning** — decides if a message needs a reply. "Okay", "Lol", thumbs up → NO_REPLY. Questions, new topics → reply.
+- [x] **Identity switching** — reply as Travis (default) or as FRIDAY based on instruction keywords
+- [x] **Auto-detection** — if Travis introduces FRIDAY in conversation ("she's called Friday") or the other person mentions FRIDAY by name, automatically switches to FRIDAY identity
+- [x] **Deflection rules** — never agrees to calls (deflects: "busy building something"), money ("noted, I'll send when I'm ready"), or plans
+- [x] **Watch deduplication** — `create_watch` detects if an active watch exists for the same contact and updates it instead of creating a duplicate
+- [x] Conversation context — reads last 20 messages and formats as dialogue for the LLM to match tone
+- [x] **@friday tagging** — type `@friday` in iMessage and FRIDAY jumps in as herself. Requires an active watch on that chat (watch is what polls for new messages).
+- [x] Phone notification on every reply — "Watch — replied to X: ..."
+- [x] `/clearwatches` CLI command — kills all active watches instantly
+
+### Watch Type Classification & Expanded Executors (`friday/background/heartbeat.py`)
+
+- [x] `_classify_watch_type(instruction)` — keyword-based dispatch: email, calls, browser, notifications, or iMessage (default)
+- [x] `_execute_email_watch()` — reads unread emails via `read_emails` tool, filters by sender keyword extracted from instruction, fingerprints email IDs, notifies on new matches
+- [x] `_execute_call_watch()` — reads missed calls via `read_call_log` tool, fingerprints latest entry, sends phone notification on new missed call
+- [x] `_execute_browser_watch()` — extracts URL from instruction, navigates via Playwright (`browser_navigate` tool), hashes page content, LLM summarizes what changed when hash differs
+- [x] All expanded executors follow baseline-first pattern (first tick records state, subsequent ticks compare)
+- [x] All expanded executors send phone notifications via `notify_fn` callback
+
+### Bugs Found & Fixed
+
+| Bug | Root Cause | Fix |
+|-----|-----------|-----|
+| "Ellen's pap" resolves to Ellen Owusuwaa | Curly apostrophe `'` broke AppleScript `name contains` | Word-fallback search — splits query into individual words |
+| "my bby" resolves to Abena Boakyewaa My Bby | "my" filtered as filler word, causing tied scores | Keep "my" in scoring, add name-length tiebreaker |
+| Messages show `(attachment)` for real texts | Some messages only in `attributedBody` blob, not `text` column | Added NSAttributedString parser |
+| Contacts.app -600 "not running" error | AppleScript `activate` blocked by sandbox | `open -a Contacts -g` + retry logic |
+| `direction="received"` returns 0 results | SQL query used confusing alias that didn't match | Simplified to single chat JOIN |
+| "reply her" calls draft_email | LLM treating "draft" as email keyword | Explicit CHANNEL DETECTION section in prompt |
+| "you" interpreted as message recipient | No disambiguation | Boxed instructions at top AND bottom of prompt |
+| "Father In Law" referred to as "he/him" | LLM assumed male | CONTACT FACTS section + memory file |
+| Reminders don't notify on iPhone | Used `due date` instead of `remind me date` | Switched to iMessage-to-self (instant, reliable) |
+| Cron scheduler crash on stop with no jobs | APScheduler not started when 0 jobs | Guard: `if self.scheduler.running` before shutdown |
+| Teddy Bear returns month-old messages | Phone `+27 (60) 757-4393` cleaned to `+27(60)7574393` (parentheses kept), mismatched handle `+27607574393`. Fell back to email thread (old messages). | `re.sub(r'[^\d+]', '', rid)` strips all non-digit/non-+ chars from phone numbers |
+| Watch tasks never actually sent replies | `send_imessage()` called without `confirm=True` — only returned previews | Added `confirm=True` to watch task send call |
+| Watch tasks sent phantom replies on creation | `last_state` is NULL on first tick, so fingerprint comparison always sees "new" message | First tick sets baseline state without replying |
+| Watch tasks spammed repeated messages | Every tick gave LLM full tool access, LLM would read+reply every time | Restructured: code reads messages first, compares fingerprint, only invokes LLM for genuinely new unreplied messages |
+| Conversation context fed backwards to LLM | `reversed()` applied to already-chronological messages | Removed unnecessary reverse |
+| Duplicate watches for same contact | Every "watch X" created a new task | `create_watch` checks for existing active watch on same contact, updates instead of inserting |
+
+### Multi-Agent Deep Research (`friday/agents/deep_research_agent.py`) — NEW FILE
+
+- [x] `DeepResearchAgent` — multi-agent coordinator for complex tasks producing deliverables
+- [x] **Phased execution** — planner breaks task into phases, steps in same phase run in parallel
+- [x] **Step types**: SEARCH (multiple queries), FETCH (URL), READ_FILE (local), WRITE (section)
+- [x] **Parallel research** — 4-6 search sub-agents fire simultaneously, each with 2-3 queries + page fetches
+- [x] **Parallel writing** — all document sections written by separate LLM calls at once
+- [x] **Improvement mode** — reads existing document, researches its topics, rewrites with evidence and citations
+- [x] **Synthesis** — abstract + conclusion written across all sections (1 LLM call)
+- [x] **Auto-save** — saves to Desktop/Downloads based on task wording, default `~/Documents/friday_files/`
+- [x] **Default save location** — `~/Documents/friday_files/` when no destination specified, Desktop/Downloads when explicitly asked
+- [x] **Multi-format output** — `.docx` (default), `.md`, `.txt`, `.pdf`. Format detected from task text ("save as pdf", "markdown file")
+- [x] **Format-specific writers** — `_save_docx()` (python-docx), `_save_md()`, `_save_txt()`, `_save_pdf()` (WeasyPrint/HTML fallback)
+- [x] **File conversion** — `convert_file(source, target_format)` converts between all supported formats. Parses docx and markdown structure.
+- [x] **convert_file tool** — wired into direct dispatch so FRIDAY can convert files conversationally ("convert my thesis to pdf")
+- [x] **Router patterns** — catches "deep research", "write a paper", "improve my thesis", "create a report", etc.
+- [x] **LLM classifier** — added `deep_research_agent` to valid agents list
+- [x] Use cases: research papers, school/uni submissions, thesis improvement, competitive analysis, literature reviews, idea-to-report pipeline
+
+### Screen Vision & Question Solver (`friday/tools/screen_tools.py`) — NEW FILE
+
+**Screen reading:**
+- [x] `capture_screen(region?)` — takes screenshot via macOS `screencapture -x`, returns path + base64
+- [x] `ocr_screen(image_path?)` — extracts all text via Apple Vision framework (Swift), offline, fast, free
+- [x] `ask_about_screen(query, image_path?)` — sends screenshot to Qwen2.5-VL (Ollama) for full image understanding
+- [x] Fallback chain: Qwen2.5-VL → OCR + Groq text LLM → raw OCR text
+- [x] Privacy gate: `FRIDAY_SCREEN_ACCESS=true` in `.env` required, on-command only
+- [x] Auto-cleanup: screenshots older than 48 hours deleted on every capture
+
+**Full-page capture + question solver:**
+- [x] `capture_full_page(max_scrolls?, app?)` — scrolls entire page, OCRs each viewport, deduplicates overlapping text
+- [x] `solve_screen_questions(save_path?, app?, full_page?)` — captures page, solves all questions, saves to .docx
+- [x] Window-only capture — gets frontmost window bounds via AppleScript, captures just the window (no dock/menu bar)
+- [x] Largest-window selection — picks biggest window by area (fixes Safari's 33px toolbar-as-window-1 bug)
+- [x] Scroll-to-top before capture — `Cmd+Up` so it starts from the beginning regardless of current scroll position
+- [x] Click-to-focus — clicks center of window before scrolling to ensure content area has focus
+- [x] Arrow-down scrolling — 15x arrow-down per page (more reliable across apps than Page Down keycode)
+- [x] UI chrome filtering — strips browser toolbar, menu bar, short fragments, URLs before overlap comparison
+- [x] Smart overlap detection — requires 2 consecutive >85% overlap frames to confirm end-of-page
+- [x] Text deduplication — removes overlapping lines between consecutive frames
+- [x] OCR text cleaning — strips File/Edit/View menus, URLs, ellipsis fragments before sending to LLM
+- [x] Smart input truncation — first 5K + last 3K chars for long pages (stays within Groq TPM limits)
+- [x] Markdown-to-docx formatter — proper headings, **bold**, *italic*, numbered lists, bullet lists, horizontal rule stripping
+- [x] App targeting — `app` parameter activates specified app before capturing (Safari, Chrome, Preview, Word, etc.)
+- [x] Viewport-only mode — `full_page=false` captures current view only, no scrolling
+- [x] Tested E2E: 20-page Safari workbook → all questions captured and solved, 16K chars of detailed answers
+
+**Wiring:**
+- [x] Wired into system_agent (dynamic tool injection on screen/solve/question keywords)
+- [x] Wired into direct dispatch (`ocr_screen`, `ask_about_screen`, `capture_full_page`, `solve_screen_questions`)
+- [x] Router patterns: screen vision + solve/answer/full-page/question/quiz/exam/worksheet → system_agent
+
+---
+
+## Phase 5 — Browser Batch Tools & Autonomous Job Applications (COMPLETE)
+
+**Goal:** Make FRIDAY fill forms fast (150s → 15s), apply to jobs autonomously, and handle "fill the form on my screen" from any page.
+
+### Browser Batch Tools (`friday/tools/browser_tools.py`)
+
+- [x] **`browser_discover_form()`** — scrolls entire page (loads lazy elements), finds ALL inputs/selects/textareas regardless of viewport, returns selector, type, label, value, required status, filled status, `unfilled_required_count`, `all_required_filled` flag
+- [x] **`browser_fill_form(fields, click_first)`** — batch fills ALL fields in a single Safari JS call. Detects React-Select fields and handles them in a second pass. `click_first` param clicks an Apply button before filling.
+- [x] **React-Select handling** — detects inputs with `css-` class prefix, focus → type via native setter + InputEvent → wait 300ms → click first `[class*="option"]` or `[id*="option-"]`
+- [x] **File upload via DataTransfer API** — base64 encode → `new File([byteArray])` → `new DataTransfer()` → `input.files = dt.files`. Bypasses Safari's native file chooser restriction.
+- [x] **`:has-text()` selector conversion** — Playwright-only selector detected and converted to JS text search for Safari compatibility
+- [x] **Click verification** — `_safari_click` verifies element exists before reporting success, returns `not_found` error instead of false success
+- [x] **Textarea fix** — uses `HTMLTextAreaElement.prototype` value setter for textareas, `HTMLInputElement.prototype` for inputs
+
+### Job Agent Rewrite (`friday/agents/job_agent.py`)
+
+- [x] **3-phase autonomous workflow:** Phase 1 (search for job via `search_web`), Phase 2 (tailor CV to JD), Phase 3 (fill application with verification loop)
+- [x] Agent searches itself — no spoon-fed URLs. Uses official career pages, follows redirects to Greenhouse/Lever/Workday
+- [x] CV tailoring per job — `tailor_cv()` caches context in module-level `_tailoring_context`, `generate_pdf()` auto-uses it
+- [x] Verification loop — keeps calling `browser_discover_form()` until `unfilled_required_count == 0`
+- [x] 30 max iterations (up from default 10) — enough for search → navigate → read JD → tailor → fill → verify
+- [x] Prompt handles edge cases: React SPAs, LinkedIn search, job listing vs job description pages
+
+### System Agent Form Filling (`friday/agents/system_agent.py`)
+
+- [x] **"Fill the form on my screen"** — system agent discovers and batch-fills forms on current Safari page
+- [x] Travis's details hardcoded in prompt — name, email, phone, LinkedIn, GitHub, website, location. Never asks.
+- [x] Dynamic tool injection — `browser_discover_form`, `browser_fill_form`, `browser_upload` injected when form keywords detected
+- [x] CV tools injected for form tasks — `generate_pdf`, `tailor_cv` available when CV upload needed
+- [x] Dynamic `max_iterations` — bumped to 15 for form tasks (discover → fill → verify loops), resets to 5 after
+- [x] Form keyword triggers: "fill form", "fill the form", "fill out", "complete the form", "submit the form"
+
+### Router Updates (`friday/core/router.py`)
+
+- [x] Form-filling patterns added — "fill the form", "fill in the form", "complete this form" → system_agent
+- [x] LLM classifier updated — system_agent description includes form-filling capability
+- [x] Job-specific requests still route to job_agent ("apply for", "CV", "resume", "career page")
+
+### Base Agent Fix (`friday/core/base_agent.py`)
+
+- [x] Synthetic `tool_call_id` generation — local Ollama fallback doesn't produce IDs, breaks subsequent Groq calls. Now generates `call_{uuid}` when missing.
+
+### CV Tools Fix (`friday/tools/cv_tools.py`)
+
+- [x] Tailoring context cache — `_tailoring_context` dict stores job_title/company/job_description
+- [x] `tailor_cv()` returns simple confirmation (not full CV dict) — prevents Groq from rejecting huge tool call args
+- [x] `generate_pdf()` auto-uses `_tailoring_context` to customize CV summary
+
+### Bugs Fixed
+
+| Bug | Root Cause | Fix |
+|-----|-----------|-----|
+| LLM fills zero form fields | Prompt didn't enforce tool calls before text | "Your first response must ALWAYS be a tool call" |
+| `:has-text()` silently fails in Safari | Playwright-only selector, Safari returns null | Convert to JS text search in `_safari_click` |
+| Textareas not filling | `HTMLInputElement.prototype` used for all fields | Check `el.tagName === 'TEXTAREA'`, use correct prototype |
+| Safari file upload fails | JS `.click()` on file input blocked by security | DataTransfer API bypass |
+| Agent loops on invented selectors | LLM generates `:has-text()`, `data-*` selectors | "NEVER guess selectors" in prompt + error on not-found |
+| `click_first: null` rejected by Groq | Schema said `"type": "string"` | Changed to `"type": ["string", "null"]` |
+| Missing `tool_call_id` breaks cloud | Ollama fallback doesn't produce IDs | Synthetic UUID generation in base_agent.py |
+| Huge `tailored_cv` dict rejected by Groq | Full CV object too large for schema validation | Module-level `_tailoring_context` cache |
+| Agent wastes 50s on screen OCR for web pages | OCR-based screen reading used for browser pages | Use `browser_get_text` instead (200ms vs 50s) |
+| React-Select dropdowns not filling | `.value = ...` doesn't update React state | Second-pass: focus → InputEvent → sleep → click option |
+
+---
+
+## Phase 6 — WhatsApp Integration (COMPLETE)
+
+**Goal:** Give FRIDAY full WhatsApp read/send/search capability, matching the existing iMessage integration.
+
+### Architecture
+
+```
+FRIDAY (Python) → HTTP (localhost:3100) → Express Bridge (Node.js/Baileys) → WhatsApp Servers
+```
+
+No third-party cloud. No message forwarding. Baileys connects as a WhatsApp Web linked device using the same Noise Protocol + Protobuf that WhatsApp Desktop uses.
+
+### Baileys HTTP Bridge (`friday/whatsapp/server.js`)
+
+- [x] Express server on `localhost:3100` wrapping `@whiskeysockets/baileys`
+- [x] Multi-device auth via `useMultiFileAuthState` — credentials persist at `~/.friday/whatsapp/auth_state/`
+- [x] QR code displayed in terminal via `qrcode-terminal` for first-time pairing
+- [x] Auto-reconnect on disconnect (up to 5 retries with exponential backoff)
+- [x] Full history sync (`syncFullHistory: true`) — pulls existing chats and messages on connect
+- [x] In-memory message store — last 100 messages per chat for fast reads
+- [x] Chat metadata tracking — name, last message, timestamp from both live messages and history sync
+- [x] Contact resolution — find JID by name (fuzzy match against pushName/chat name) or phone number
+- [x] REST endpoints: `/status`, `/send`, `/chats`, `/messages`, `/search`, `/read`, `/check/:phone`, `/logout`
+- [x] Handles 515 stream errors (WhatsApp server resets) gracefully — auto-reconnects in 2-15s
+- [x] Auth state cleanup on logout (code `DisconnectReason.loggedOut`)
+
+### Python Tools (`friday/tools/whatsapp_tools.py`)
+
+- [x] `send_whatsapp(recipient, message, confirm)` — send messages with safety gate (preview → confirm pattern matching iMessage)
+- [x] `read_whatsapp(contact, limit)` — read messages from a contact (by name or phone) or list recent chats
+- [x] `search_whatsapp(query, limit)` — search messages across all chats by text content
+- [x] `whatsapp_status()` — check bridge connection state (connected / qr_pending / bridge_offline)
+- [x] Persistent `httpx.AsyncClient` for connection reuse
+- [x] Direction labels (`sent`/`received`) and `from` field matching iMessage tools format
+- [x] Unreplied detection — flags when last message is from them (for watch tasks)
+- [x] Bridge health check before every operation — clear error messages when bridge is down
+
+### Integration
+
+- [x] **Comms Agent** (`friday/agents/comms_agent.py`) — WhatsApp tools loaded alongside iMessage/email, channel detection in prompt ("whatsapp" → WhatsApp tools, never iMessage)
+- [x] **Tool Dispatch** (`friday/core/tool_dispatch.py`) — `read_whatsapp`, `send_whatsapp`, `search_whatsapp`, `whatsapp_status` added to direct dispatch for single-tool queries
+- [x] **Router** (`friday/core/router.py`) — "whatsapp" keyword patterns route to comms_agent, LLM classifier description updated
+
+### Files Added/Modified
+
+| File | Change |
+|------|--------|
+| `friday/whatsapp/server.js` | **New** — Baileys HTTP bridge |
+| `friday/whatsapp/package.json` | **New** — Node.js dependencies |
+| `friday/tools/whatsapp_tools.py` | **New** — Python tool functions + schemas |
+| `friday/agents/comms_agent.py` | Added WhatsApp tools + channel detection prompt |
+| `friday/core/tool_dispatch.py` | Added WhatsApp tools to direct dispatch registry |
+| `friday/core/router.py` | Added WhatsApp regex patterns + comms_kw |
+| `.gitignore` | Added `friday/whatsapp/node_modules/` and `friday/whatsapp/auth_state/` |
+| `docs/whatsapp-setup.md` | **New** — Full setup guide with troubleshooting |
+
+### Setup
+
+```bash
+cd friday/whatsapp && npm install && node server.js
+# Scan QR with WhatsApp → Linked Devices → Link a Device
+# Session persists — no re-scan on restart
+```
+
+See [docs/whatsapp-setup.md](whatsapp-setup.md) for background running, launchd auto-start, port config, and troubleshooting.
+
+---
+
+*Last updated: 2026-03-28*

@@ -12,6 +12,11 @@ TODO2.md
 TODO3.md
 TODO4.md
 TODO5.md
+TODO6.md
+TODO7.md
 uv.lock
 wobbly-zooming-llama.md
 test_tv_e2e.py
+# WhatsApp bridge
+friday/whatsapp/node_modules/
+friday/whatsapp/auth_state/

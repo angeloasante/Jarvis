@@ -10,6 +10,7 @@ import json
 from typing import Optional, Callable
 from friday.core.llm import cloud_chat, extract_tool_calls, extract_text
 from friday.core.types import AgentResponse, ToolResult
+from friday.memory.conversation_log import log_react_trace
 
 
 def _compact_data(data):
@@ -114,9 +115,10 @@ class BaseAgent:
         for iteration in range(self.max_iterations):
             # After first tool execution, strip tools so the model generates
             # a text answer instead of wasting prompt eval on tool schemas.
-            # Exception: if max_iterations > 3, agent may need multi-step tools.
+            # Only strip for agents with max_iterations <= 2 (truly single-tool).
+            # Most agents need 2+ calls (read → send, discover → fill, etc.)
             offer_tools = self.tool_definitions if self.tool_definitions else None
-            if iteration > 0 and tools_called and self.max_iterations <= 5:
+            if iteration > 0 and tools_called and self.max_iterations <= 2:
                 offer_tools = None
 
             response = cloud_chat(
@@ -131,25 +133,37 @@ class BaseAgent:
                 text = extract_text(response)
                 if on_chunk and text:
                     on_chunk(text)
+                dur = int((time.monotonic() - start) * 1000)
+                log_react_trace(
+                    session_id="", agent_name=self.name, task=task,
+                    messages=messages, tools_called=tools_called,
+                    final_answer=text or "", success=True,
+                    duration_ms=dur, iterations=iteration + 1,
+                )
                 return AgentResponse(
                     agent_name=self.name,
                     success=True,
                     result=text,
                     tools_called=tools_called,
-                    duration_ms=int((time.monotonic() - start) * 1000),
+                    duration_ms=dur,
                 )
 
             # Process tool calls
-            # Add assistant message with tool calls to history
             msg = response.get("message", {})
+            raw_tool_calls = msg.get("tool_calls", [])
+
+            # Generate synthetic IDs if missing (local fallback doesn't produce them)
+            import uuid
+            for rtc in raw_tool_calls:
+                if not rtc.get("id"):
+                    rtc["id"] = f"call_{uuid.uuid4().hex[:8]}"
+
+            # Add assistant message with tool calls to history
             messages.append({
                 "role": msg.get("role", "assistant"),
                 "content": msg.get("content", ""),
-                "tool_calls": msg.get("tool_calls", []),
+                "tool_calls": raw_tool_calls,
             })
-
-            # Extract tool call IDs for tool-role messages (required by OpenAI API)
-            raw_tool_calls = msg.get("tool_calls", [])
 
             if len(tool_calls) == 1:
                 # Single tool — run directly
@@ -217,11 +231,18 @@ class BaseAgent:
                     messages.append(tool_msg)
 
         # Hit max iterations
+        dur = int((time.monotonic() - start) * 1000)
+        log_react_trace(
+            session_id="", agent_name=self.name, task=task,
+            messages=messages, tools_called=tools_called,
+            final_answer="Max iterations reached.", success=False,
+            duration_ms=dur, iterations=self.max_iterations,
+        )
         return AgentResponse(
             agent_name=self.name,
             success=False,
             result="Max iterations reached without final answer.",
             tools_called=tools_called,
-            duration_ms=int((time.monotonic() - start) * 1000),
+            duration_ms=dur,
             error="max_iterations_exceeded",
         )

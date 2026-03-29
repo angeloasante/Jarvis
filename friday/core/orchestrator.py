@@ -14,6 +14,7 @@ Thin wrapper — actual logic lives in:
 import asyncio
 import json
 import re
+import time
 from datetime import datetime
 from typing import AsyncGenerator, Generator
 
@@ -22,6 +23,7 @@ from friday.core.config import MODEL_NAME
 from friday.core.types import AgentResponse, ToolResult
 from friday.memory.store import get_memory_store
 from friday.background.memory_processor import get_memory_processor
+from friday.memory.conversation_log import log_turn
 from friday.agents.code_agent import CodeAgent
 from friday.agents.research_agent import ResearchAgent
 from friday.agents.memory_agent import MemoryAgent
@@ -32,6 +34,7 @@ from friday.agents.monitor_agent import MonitorAgent
 from friday.agents.briefing_agent import BriefingAgent
 from friday.agents.job_agent import JobAgent
 from friday.agents.social_agent import SocialAgent
+from friday.agents.deep_research_agent import DeepResearchAgent
 
 # ── Extracted modules ────────────────────────────────────────────────────────
 from friday.core.prompts import (
@@ -63,12 +66,31 @@ class FridayCore:
             "briefing_agent": BriefingAgent(),
             "job_agent": JobAgent(),
             "social_agent": SocialAgent(),
+            "deep_research_agent": DeepResearchAgent(),
         }
         self.memory = get_memory_store()
         self.conversation: list[dict] = []
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._mem_processor = get_memory_processor()
         self._mem_processor.start()
+        self._turn_start: float = 0  # set at beginning of each turn
+
+    def _log_and_append(self, user_input: str, response: str,
+                        route: str, agent_name: str = None,
+                        tools_called: list[str] = None):
+        """Append to conversation history AND write to training log."""
+        self.conversation.append({"role": "user", "content": user_input})
+        self.conversation.append({"role": "assistant", "content": response})
+        elapsed = int((time.monotonic() - self._turn_start) * 1000) if self._turn_start else None
+        log_turn(
+            session_id=self.session_id,
+            user_input=user_input,
+            response=response,
+            route=route,
+            agent_name=agent_name,
+            tools_called=tools_called,
+            duration_ms=elapsed,
+        )
 
     def _build_system_prompt(self, user_input: str) -> str:
         memory_context = self.memory.build_context(query=user_input)
@@ -106,8 +128,7 @@ class FridayCore:
                 full_text.append(content)
 
         text = "".join(full_text)
-        self.conversation.append({"role": "user", "content": user_input})
-        self.conversation.append({"role": "assistant", "content": text})
+        self._log_and_append(user_input, text, route="fast_chat")
         self._mem_processor.process(user_input, text)
         return text
 
@@ -153,6 +174,7 @@ class FridayCore:
           4.   Fast chat      → slim prompt, no routing context    (1 LLM call)
           5.   LLM routing    → full routing for ambiguous queries (4 LLM calls)
         """
+        self._turn_start = time.monotonic()
         s = user_input.strip().lower()
 
         def _status(msg):
@@ -203,8 +225,7 @@ class FridayCore:
                 on_chunk=_chunk,
             )
             response_text = result.result or "Couldn't get that done."
-            self.conversation.append({"role": "user", "content": user_input})
-            self.conversation.append({"role": "assistant", "content": response_text})
+            self._log_and_append(user_input, response_text, route="override", agent_name=agent_name, tools_called=result.tools_called)
             if not result.result:
                 _chunk(response_text)
             self._mem_processor.process(user_input, response_text, agent_name)
@@ -231,6 +252,7 @@ class FridayCore:
         )
         if dispatched:
             self.conversation.append({"role": "user", "content": user_input})
+            # direct_dispatch logs its own tool calls via memory.log_agent_call
             return
 
         # ── Priority 3: Agent dispatch — LLM classification (Groq ~1s), regex fallback ──
@@ -248,8 +270,7 @@ class FridayCore:
             )
 
             response_text = result.result or "Couldn't get that done."
-            self.conversation.append({"role": "user", "content": user_input})
-            self.conversation.append({"role": "assistant", "content": response_text})
+            self._log_and_append(user_input, response_text, route="agent", agent_name=agent_name, tools_called=result.tools_called)
             if not result.result:
                 _chunk(response_text)
             self._mem_processor.process(user_input, response_text, agent_name)
@@ -271,8 +292,7 @@ class FridayCore:
 
         if not tool_calls:
             text = extract_text(response)
-            self.conversation.append({"role": "user", "content": user_input})
-            self.conversation.append({"role": "assistant", "content": text})
+            self._log_and_append(user_input, text, route="llm_fallback_chat")
             _chunk(text)
             self._mem_processor.process(user_input, text)
             return
@@ -309,6 +329,7 @@ class FridayCore:
 
     async def process(self, user_input: str) -> str:
         """Process user input — non-streaming. Used when tool calls may be needed."""
+        self._turn_start = time.monotonic()
         system_prompt = self._build_system_prompt(user_input)
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -320,8 +341,7 @@ class FridayCore:
 
         if not tool_calls:
             text = extract_text(response)
-            self.conversation.append({"role": "user", "content": user_input})
-            self.conversation.append({"role": "assistant", "content": text})
+            self._log_and_append(user_input, text, route="process_chat")
             return text
 
         agent_results = []
@@ -334,13 +354,13 @@ class FridayCore:
 
         if agent_results:
             synthesis = await self._synthesize(user_input, agent_results)
-            self.conversation.append({"role": "user", "content": user_input})
-            self.conversation.append({"role": "assistant", "content": synthesis})
+            all_tools = [t for r in agent_results for t in (r.tools_called or [])]
+            agent_names = ", ".join(r.agent_name for r in agent_results)
+            self._log_and_append(user_input, synthesis, route="process_agent", agent_name=agent_names, tools_called=all_tools)
             return synthesis
 
         text = extract_text(response)
-        self.conversation.append({"role": "user", "content": user_input})
-        self.conversation.append({"role": "assistant", "content": text})
+        self._log_and_append(user_input, text, route="process_fallback")
         return text
 
     def stream(self, user_input: str) -> Generator[str, None, None]:
@@ -361,8 +381,7 @@ class FridayCore:
                 full_text += content
                 yield content
 
-        self.conversation.append({"role": "user", "content": user_input})
-        self.conversation.append({"role": "assistant", "content": full_text.strip()})
+        self._log_and_append(user_input, full_text.strip(), route="stream")
 
     async def process_and_stream(self, user_input: str, on_status=None) -> AsyncGenerator[str, None]:
         """Process with agents, streaming the final synthesis."""
@@ -380,8 +399,7 @@ class FridayCore:
 
         if not tool_calls:
             text = extract_text(response)
-            self.conversation.append({"role": "user", "content": user_input})
-            self.conversation.append({"role": "assistant", "content": text})
+            self._log_and_append(user_input, text, route="stream_chat")
             yield text
             return
 
@@ -403,8 +421,7 @@ class FridayCore:
                 yield chunk
         else:
             text = extract_text(response)
-            self.conversation.append({"role": "user", "content": user_input})
-            self.conversation.append({"role": "assistant", "content": text})
+            self._log_and_append(user_input, text, route="stream_fallback")
             yield text
 
     def needs_agent(self, user_input: str) -> bool:
@@ -569,8 +586,9 @@ class FridayCore:
                 full_text += content
                 yield content
 
-        self.conversation.append({"role": "user", "content": user_input})
-        self.conversation.append({"role": "assistant", "content": full_text.strip()})
+        all_tools = [t for r in agent_results for t in (r.tools_called or [])]
+        agent_names = ", ".join(r.agent_name for r in agent_results)
+        self._log_and_append(user_input, full_text.strip(), route="synthesis", agent_name=agent_names, tools_called=all_tools)
 
     def _build_synthesis_messages(self, user_input: str, agent_results: list[AgentResponse]) -> list[dict]:
         results_text = ""
