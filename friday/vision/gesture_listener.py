@@ -108,13 +108,18 @@ class GestureListener:
     def _init_camera():
         """Open the FaceTime camera with warmup."""
         import cv2
+        import platform
 
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
-            raise RuntimeError(
-                "Camera unavailable — check macOS privacy settings "
-                "or close apps using the camera"
-            )
+            hint = "close apps using the camera"
+            if platform.system() == "Darwin":
+                hint = (
+                    "grant camera permission to your terminal (System Settings "
+                    "→ Privacy & Security → Camera → add Terminal / iTerm / Warp / "
+                    "whichever app you launched `friday` from), then restart FRIDAY"
+                )
+            raise RuntimeError(f"Camera unavailable — {hint}")
 
         # AVFoundation warmup — drain black frames
         for _ in range(8):
