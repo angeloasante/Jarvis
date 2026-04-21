@@ -1,6 +1,7 @@
 """FRIDAY CLI — text + voice interface."""
 
 import asyncio
+import os
 import random
 import sys
 import time
@@ -14,7 +15,7 @@ from prompt_toolkit.formatted_text import HTML
 
 from friday.core.orchestrator import FridayCore
 from friday.core.config import DATA_DIR
-from friday.background.monitor_scheduler import get_monitor_scheduler
+# monitor_scheduler removed — heartbeat handles all watches now (URL, search, topic)
 from friday.background.heartbeat import get_heartbeat_runner
 from friday.background.cron_scheduler import get_cron_scheduler
 
@@ -55,16 +56,9 @@ def print_banner():
 
     console.print()
     console.print("  Personal AI Operating System v0.3", style=DG)
-    voice_flag = "--voice" in sys.argv
-    voice_status = "[bold green]ACTIVE[/bold green]" if voice_flag else "[dim]off (--voice)[/dim]"
-    console.print(f"  Status: [bold green]ONLINE[/bold green]  |  Model: [green]qwen3.5:9b[/green]  |  Voice: {voice_status}", style=DG)
+    console.print(f"  Status: [bold green]ONLINE[/bold green]  |  /help [dim]for commands[/dim]", style=DG)
     console.print()
     console.print(Rule(style=G))
-    console.print()
-    cmds = "  /quit [dim]exit[/dim]  |  /clear [dim]reset[/dim]  |  /memory [dim]recall[/dim]  |  /voice [dim]toggle[/dim]  |  /clearwatches [dim]kill all watches[/dim]"
-    console.print(cmds, style=DG)
-    cmds2 = "  /listening-off [dim]pause mic[/dim]  |  /listening-on [dim]resume mic[/dim]"
-    console.print(cmds2, style=DG)
     console.print()
 
 
@@ -123,14 +117,8 @@ async def main():
     print_banner()
     friday = FridayCore()
 
-    # Start background monitor scheduler
-    try:
-        scheduler = get_monitor_scheduler()
-        await scheduler.start()
-    except Exception:
-        pass  # Non-critical — FRIDAY works fine without monitors
-
-    # Start heartbeat (proactive background checks) — alerts go to phone + CLI
+    # Start heartbeat (proactive background checks) — handles ALL watches:
+    # iMessage, WhatsApp, email, calls, URL diffing, web search, topic tracking
     try:
         from friday.tools.notify import notify_phone_async
         heartbeat = get_heartbeat_runner(notify_fn=notify_phone_async)
@@ -164,6 +152,41 @@ async def main():
         except Exception as e:
             console.print(f"  [red]✗ Voice failed to start: {e}[/red]")
 
+    # Gesture control
+    gesture_listener = None
+    if os.environ.get("FRIDAY_GESTURES", "").lower() == "true":
+        try:
+            from friday.vision.gesture_listener import GestureListener
+            loop = asyncio.get_event_loop()
+            gesture_listener = GestureListener(friday, loop)
+            gesture_listener.start()
+        except Exception as e:
+            console.print(f"  [red]✗ Gestures failed to start: {e}[/red]")
+
+    # SMS server (Twilio — text FRIDAY from anywhere)
+    if os.environ.get("TWILIO_ACCOUNT_SID") and os.environ.get("TWILIO_AUTH_TOKEN", "") != "your_auth_token_here":
+        try:
+            from friday.sms.server import start_server as start_sms
+            sms_loop = asyncio.get_event_loop()
+            start_sms(friday=friday, loop=sms_loop)
+        except Exception as e:
+            console.print(f"  [red]✗ SMS server failed: {e}[/red]")
+
+    # ngrok — expose SMS webhook on static domain
+    ngrok_domain = os.environ.get("NGROK_DOMAIN", "")
+    if ngrok_domain and os.environ.get("TWILIO_ACCOUNT_SID"):
+        try:
+            import subprocess
+            subprocess.run(["pkill", "-f", "ngrok http"], capture_output=True, timeout=3)
+            import time as _time; _time.sleep(1)
+            subprocess.Popen(
+                ["ngrok", "http", "3200", "--domain", ngrok_domain],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            console.print(f"  [bold green]:: SMS webhook ACTIVE — https://{ngrok_domain}/sms[/bold green]")
+        except Exception:
+            pass
+
     session: PromptSession = PromptSession(
         history=FileHistory(str(HISTORY_FILE)),
         auto_suggest=AutoSuggestFromHistory(),
@@ -185,9 +208,49 @@ async def main():
         if not user_input:
             continue
 
+        if user_input == "/help":
+            console.print()
+            console.print("  [bold green]Commands[/bold green]")
+            console.print("  [green]/quit[/green]              Exit FRIDAY")
+            console.print("  [green]/clear[/green]             Reset conversation history")
+            console.print("  [green]/memory[/green]            Show recent stored memories")
+            console.print("  [green]/help[/green]              This menu")
+            console.print()
+            console.print("  [bold green]Voice[/bold green]")
+            console.print("  [green]/voice[/green]             Toggle voice pipeline on/off")
+            console.print("  [green]/listening-on[/green]      Resume ambient mic listening")
+            console.print("  [green]/listening-off[/green]     Pause ambient mic listening")
+            console.print()
+            console.print("  [bold green]Gesture Control[/bold green]")
+            console.print("  [green]/gestures-on[/green]       Start camera + gesture detection")
+            console.print("  [green]/gestures-off[/green]      Stop camera + gesture detection")
+            console.print("  [green]/gestures[/green]          Toggle gestures on/off")
+            console.print()
+            console.print("  [bold green]Background[/bold green]")
+            console.print("  [green]/clearwatches[/green]      Kill all active watch tasks")
+            console.print()
+            console.print("  [bold green]Agent Override[/bold green]")
+            console.print("  [green]@comms[/green]             Force route to comms agent")
+            console.print("  [green]@research[/green]          Force route to research agent")
+            console.print("  [green]@household[/green]         Force route to TV / smart home")
+            console.print("  [green]@system[/green]            Force route to system agent")
+            console.print("  [green]@social[/green]            Force route to X / Twitter agent")
+            console.print("  [green]@code[/green]              Force route to code agent")
+            console.print("  [green]@job[/green]               Force route to job agent")
+            console.print("  [green]@memory[/green]            Force route to memory agent")
+            console.print()
+            # Show current status
+            voice_on = voice_pipeline and voice_pipeline._running
+            gesture_on = gesture_listener and gesture_listener._running
+            console.print(f"  [dim]Voice: {'ON' if voice_on else 'OFF'}  |  Gestures: {'ON' if gesture_on else 'OFF'}[/dim]")
+            console.print()
+            continue
+
         if user_input == "/quit":
             if voice_pipeline:
                 voice_pipeline.stop()
+            if gesture_listener:
+                gesture_listener.stop()
             console.print("  [dim green]Session terminated.[/dim green]\n")
             break
 
@@ -221,6 +284,30 @@ async def main():
                     console.print("  [bold green]:: Voice ON[/bold green]\n")
                 except Exception as e:
                     console.print(f"  [red]✗ Voice failed: {e}[/red]\n")
+            continue
+
+        if user_input in ("/gestures", "/gestures-on", "/gestures-off"):
+            is_on = gesture_listener and gesture_listener._running
+            # Decide action: explicit on/off or toggle
+            want_on = (user_input == "/gestures-on") or (user_input == "/gestures" and not is_on)
+            want_off = (user_input == "/gestures-off") or (user_input == "/gestures" and is_on)
+
+            if want_off and is_on:
+                gesture_listener.stop()
+                gesture_listener = None
+                console.print("  [dim green]:: Gestures OFF — camera released[/dim green]\n")
+            elif want_on and not is_on:
+                try:
+                    from friday.vision.gesture_listener import GestureListener
+                    loop = asyncio.get_event_loop()
+                    gesture_listener = GestureListener(friday, loop)
+                    gesture_listener.start()
+                except Exception as e:
+                    console.print(f"  [red]✗ Gestures failed: {e}[/red]\n")
+            elif want_on and is_on:
+                console.print("  [dim green]:: Gestures already ON[/dim green]\n")
+            else:
+                console.print("  [dim green]:: Gestures already OFF[/dim green]\n")
             continue
 
         if user_input == "/clearwatches":
@@ -265,6 +352,28 @@ async def main():
 
 
 def run():
+    # Admin commands: `friday init`, `friday config/doctor/setup/test/heartbeat …`
+    # — run without booting FRIDAY.
+    from friday.core.onboarding import (
+        maybe_handle_admin_command as _profile_admin,
+        needs_onboarding,
+        run_onboarding,
+        ensure_friday_dir,
+    )
+    from friday.core.setup_wizard import maybe_handle_admin_command as _wizard_admin
+
+    for handler in (_profile_admin, _wizard_admin):
+        admin_exit = handler(sys.argv)
+        if admin_exit is not None:
+            sys.exit(admin_exit)
+
+    # Ensure ~/.friday/ + README exist so terminal users can find their config.
+    ensure_friday_dir()
+
+    # First run (no user.json yet) → run the wizard before booting.
+    if needs_onboarding() and sys.stdin.isatty():
+        run_onboarding()
+
     asyncio.run(main())
 
 

@@ -336,7 +336,7 @@ TOOL_SCHEMAS = {
             "type": "function",
             "function": {
                 "name": "create_event",
-                "description": "Create a calendar event in macOS Calendar. IMPORTANT: Set confirm=True only after Travis has reviewed. Always preview first.",
+                "description": "Create a calendar event in macOS Calendar. IMPORTANT: Set confirm=True only after the user has reviewed. Always preview first.",
                 "parameters": {
                     "type": "object",
                     "properties": {

@@ -121,16 +121,8 @@ async def match_fast(s: str):
         r = await tv_mute(False)
         return ("Unmuted." if r.success else "Couldn't unmute."), r
 
-    # ── TV Apps: "open/put on netflix/youtube/disney/spotify/prime" ──
-    m = re.match(
-        r"^(?:open|launch|put on|play|start|go to)\s+"
-        r"(netflix|youtube|spotify|disney\+?|disney|prime|prime video|apple tv|appletv)"
-        r"(?:\s+on\s+(?:the\s+)?(?:tv|telly))?\s*[.!]?$", s
-    )
-    if m:
-        app = m.group(1).strip()
-        r = await tv_launch_app(app)
-        return (f"{app.title()}'s loading." if r.success else f"Couldn't open {app}: {r.error.message}"), r
+    # NOTE: bare "open netflix/spotify/youtube" (no "on tv") means the Mac app —
+    # handled below (fast_path) or system_agent for unknown apps.
 
     # ── TV Apps on TV: "open youtube on my tv" ──
     m = re.match(
@@ -145,11 +137,14 @@ async def match_fast(s: str):
         return (f"{app.title()}'s loading." if r.success else f"Couldn't open {app}: {r.error.message}"), r
 
     # ── TV Pause/Resume ──
-    if re.match(r"^(pause|pause\s*(the )?(tv|it|video|show|movie))\s*[.!]?$", s):
+    # Only fire TV pause/resume when the user EXPLICITLY names tv/video/show/movie.
+    # Bare "pause" / "pause the music" goes to the LLM so it can pick between
+    # tv_play_pause (TV) and play_music (Mac Music).
+    if re.match(r"^pause\s*(the\s+)?(tv|video|show|movie|telly)\s*[.!]?$", s):
         r = await tv_play_pause("pause")
         return ("Paused." if r.success else "Couldn't pause."), r
 
-    if re.match(r"^(resume|unpause|play|resume\s*(the )?(tv|it|video|show|movie))\s*[.!]?$", s):
+    if re.match(r"^(resume|unpause)\s*(the\s+)?(tv|video|show|movie|telly)\s*[.!]?$", s):
         r = await tv_play_pause("play")
         return ("Playing." if r.success else "Couldn't resume."), r
 
@@ -169,6 +164,48 @@ async def match_fast(s: str):
             d = r.data
             return f"TV is {d.get('power', 'on')}. Volume {d.get('volume', '?')}. {d.get('app', 'No app')} is open.", r
         return ("TV seems off or unreachable." if not r.success else "TV is on."), r
+
+    # ── Screen casting (AirPlay) ──
+    # "extend my screen to [the] tv" / "cast to tv" / "mirror screen to tv"
+    m = re.match(
+        r"^(?:can you\s+|please\s+)?(extend|cast|mirror|share|project|send)\s+"
+        r"(?:my\s+|the\s+)?(?:screen|display)\s+"
+        r"(?:to|onto|on)\s+(?:my\s+|the\s+)?"
+        r"(.+?)\s*[.!?]?$",
+        s,
+    )
+    if m:
+        from friday.tools.screencast_tools import cast_screen_to
+        verb, target = m.group(1), m.group(2).strip()
+        mode = "extend" if verb in ("extend", "project") else "mirror"
+        r = await cast_screen_to(target, mode)
+        if r.success:
+            msg = r.data.get("message") if r.data else "Casting."
+            return msg, r
+        return (r.error.message if r.error else "Couldn't start casting."), r
+
+    # "cast to [device]" — shorter form
+    m = re.match(
+        r"^(?:cast|mirror|airplay)\s+(?:to\s+)?(?:my\s+|the\s+)?(.+?)\s*[.!?]?$", s
+    )
+    if m and len(m.group(1).split()) <= 5:
+        from friday.tools.screencast_tools import cast_screen_to
+        target = m.group(1).strip()
+        r = await cast_screen_to(target, "mirror")
+        if r.success:
+            msg = r.data.get("message") if r.data else "Mirroring."
+            return msg, r
+        return (r.error.message if r.error else "Couldn't mirror."), r
+
+    # "stop casting" / "stop mirroring" / "stop airplay"
+    if re.match(r"^stop\s+(cast(ing)?|mirror(ing)?|airplay|screen\s*share)\s*[.!?]?$", s):
+        from friday.tools.screencast_tools import stop_screencast
+        r = await stop_screencast()
+        msg = r.data.get("message") if r.success and r.data else (r.error.message if r.error else "Stopped.")
+        return msg, r
+
+    # Note: "open X on extended/tv display" left to the LLM — too ambiguous to
+    # regex-match without false positives on normal "open X on my mac" queries.
 
     # ── FaceTime: "facetime mom" / "call john on facetime" ──
     ft_match = re.match(
@@ -192,5 +229,23 @@ async def match_fast(s: str):
             return f"Calling {name} on {call_type}.", r
         err = r.error.message if r.error else "Couldn't start FaceTime."
         return err, r
+
+    # ── Mac app open: "open spotify" / "launch chrome" / "start notes" ──
+    # Zero LLM calls — pure Python safe-list check + open -a <app>.
+    # Unknown apps fall through to system_agent.
+    m = re.match(
+        r'^(?:open|launch|start)\s+(?:the\s+|my\s+)?(.+?)(?:\s+app(?:lication)?)?\s*[.!]?$',
+        s
+    )
+    if m:
+        from friday.tools.mac_tools import open_application, _safe_apps, APP_ALIASES
+        app_raw = m.group(1).strip()
+        safe = _safe_apps()
+        if app_raw in safe or app_raw in APP_ALIASES:
+            r = await open_application(app_raw)
+            if r.success:
+                display = APP_ALIASES.get(app_raw, app_raw).title()
+                return f"Opening {display}.", r
+            return r.error.message if r.error else "Couldn't open that app.", r
 
     return None

@@ -201,7 +201,7 @@ TOOL_SCHEMAS = {
         "fn": list_repos,
         "schema": {"type": "function", "function": {
             "name": "list_repos",
-            "description": "List all of Travis's GitHub repositories with descriptions, languages, and stats.",
+            "description": "List all of the user's GitHub repositories with descriptions, languages, and stats.",
             "parameters": {"type": "object", "properties": {
                 "limit": {"type": "integer", "description": "Max repos to return (default 30)"},
             }, "required": []},
@@ -233,7 +233,7 @@ TOOL_SCHEMAS = {
         "fn": get_recent_activity,
         "schema": {"type": "function", "function": {
             "name": "get_recent_activity",
-            "description": "Get Travis's recent GitHub activity across all repos (commits, PRs, issues).",
+            "description": "Get the user's recent GitHub activity across all repos (commits, PRs, issues).",
             "parameters": {"type": "object", "properties": {
                 "limit": {"type": "integer", "description": "Max events (default 20)"},
             }, "required": []},

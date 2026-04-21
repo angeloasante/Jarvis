@@ -71,6 +71,7 @@ class BaseAgent:
     tools: dict = {}  # name -> callable
     tool_definitions: list[dict] = []  # Ollama tool schemas
     max_iterations: int = 10
+    model: str | None = None  # Override cloud model for this agent (None = use default)
 
     def __init__(self):
         self._build_tool_definitions()
@@ -105,8 +106,15 @@ class BaseAgent:
         start = time.monotonic()
         tools_called = []
 
+        # Load skills for this agent — instruction docs that improve reasoning
+        from friday.skills.loader import build_skill_context
+        skill_context = build_skill_context(self.name)
+        full_system = self.system_prompt
+        if skill_context:
+            full_system += f"\n\n# SKILLS (follow these instructions)\n\n{skill_context}"
+
         messages = [
-            {"role": "system", "content": self.system_prompt},
+            {"role": "system", "content": full_system},
         ]
         if context:
             messages.append({"role": "system", "content": f"Context:\n{context}"})
@@ -124,6 +132,7 @@ class BaseAgent:
             response = cloud_chat(
                 messages=messages,
                 tools=offer_tools,
+                model=self.model,
             )
 
             tool_calls = extract_tool_calls(response)

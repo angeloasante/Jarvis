@@ -1,0 +1,76 @@
+{
+  "name": "Ada",
+  "bio": "ML engineer, Lagos — building robotics on the side",
+  "location": "Lagos, Nigeria",
+  "country_code": "NG",
+  "email": "ada@example.com",
+  "phone": "+2348012345678",
+  "github": "ada",
+  "website": "ada.dev",
+  "tone": "direct, dry humour, no corporate language",
+  "slang": {
+    "oya": "let's go",
+    "abeg": "please"
+  },
+  "contact_aliases": {
+    "Mama": "Mother",
+    "Uncle T": "Tunde Adeyemi"
+  },
+  "briefing_watchlist": [
+    {"handle": "@nigerianstat", "note": "policy + stats relevant to Nigeria"},
+    {"query": "robotics africa funding", "note": "funding news in African robotics"}
+  ],
+  "cv": {
+    "name": "Ada Example",
+    "preferred_name": "Ada",
+    "first_name": "Ada",
+    "last_name": "Example",
+    "title": "ML Engineer",
+    "contact": {
+      "email": "ada@example.com",
+      "phone": "+2348012345678",
+      "location": "Lagos, Nigeria",
+      "github": "github.com/ada",
+      "linkedin": "linkedin.com/in/ada",
+      "portfolio": "ada.dev"
+    },
+    "status": {
+      "right_to_work": "Yes — Nigerian citizen",
+      "availability": "Immediate",
+      "work_preference": "Remote"
+    },
+    "summary": "ML engineer with 3 years building production systems across NLP, computer vision, and robotics.",
+    "experience": [
+      {
+        "role": "ML Engineer",
+        "company": "Example Co",
+        "period": "2023 — Present",
+        "location": "Lagos, Nigeria",
+        "highlights": [
+          "Shipped a recommendations model that lifted click-through by 18%",
+          "Owned the training pipeline end-to-end"
+        ]
+      }
+    ],
+    "projects": [
+      {
+        "name": "ExampleProject",
+        "summary": "One-line description of what it does.",
+        "tech": ["Python", "PyTorch"]
+      }
+    ],
+    "skills": {
+      "languages": ["Python", "SQL"],
+      "ai_ml": ["PyTorch", "Transformers", "RAG"]
+    },
+    "education": [
+      {
+        "school": "University of Lagos",
+        "qualification": "BSc Computer Science",
+        "location": "Lagos, Nigeria",
+        "period": "2019 — 2023"
+      }
+    ],
+    "certifications": []
+  }
+}

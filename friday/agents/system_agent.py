@@ -12,6 +12,14 @@ from friday.tools.terminal_tools import TOOL_SCHEMAS as TERMINAL_TOOLS
 from friday.tools.mac_tools import TOOL_SCHEMAS as MAC_TOOLS
 from friday.tools.file_tools import TOOL_SCHEMAS as FILE_TOOLS
 
+# Screen casting + extended display (AirPlay)
+try:
+    from friday.tools.screencast_tools import TOOL_SCHEMAS as CAST_TOOLS
+    _HAS_CAST = True
+except Exception:
+    CAST_TOOLS = {}
+    _HAS_CAST = False
+
 # Browser tools are optional — only loaded if playwright is installed
 try:
     from friday.tools.browser_tools import TOOL_SCHEMAS as BROWSER_TOOLS
@@ -35,7 +43,7 @@ from friday.tools.pdf_tools import TOOL_SCHEMAS as PDF_TOOLS
 from friday.tools.screen_tools import TOOL_SCHEMAS as SCREEN_TOOLS
 
 
-SYSTEM_PROMPT = """You control Travis's Mac. You handle system operations, file management, browser automation, and terminal commands.
+_BASE_PROMPT = """You control the user's Mac. You handle system operations, file management, browser automation, and terminal commands.
 
 ALWAYS respond in English.
 
@@ -44,6 +52,18 @@ RULES:
 2. For dangerous operations (delete, format, force kill), always report what you're about to do and ask for confirmation.
 3. NEVER run commands that could destroy data without explicit confirmation.
 4. Your first response must ALWAYS be a tool call, not text.
+
+CHAINING (CRITICAL — this is where tasks fail):
+If the task has MULTIPLE verbs/steps (e.g. "open X AND paste Y", "take screenshot THEN describe", "open app AND play Z"), you MUST call a tool for EACH step. After step 1's tool result comes back, issue the NEXT tool call. Do NOT return text after only completing step 1.
+Examples:
+- "open notes and paste 'hello'" → open_application('Notes') → type_text(text='hello', app='Notes') → THEN text.
+- "take a screenshot and describe it" → take_screenshot() → ask_about_screen(query='describe what is on screen') → THEN text.
+- "open apple music on my mac and play i wish i had a girlfriend" → open_application('Music') → type_text(text='i wish i had a girlfriend', app='Music', submit=True) → THEN text.
+- "open safari and go to hacker news" → open_application('Safari') → browser_navigate(url='https://news.ycombinator.com') (if browser tools available), or use AppleScript to open the URL in Safari.
+Only return plain text when EVERY verb in the original task has been executed with a real tool call. If you only did step 1, you are NOT done.
+
+HONESTY:
+If no available tool can do what's asked, say so plainly ("I can't do X from here — no tool for it") instead of inventing a result. Never claim something succeeded that you didn't actually call a tool for.
 
 CAPABILITIES:
 - Terminal: run commands, start background processes, manage running processes
@@ -69,21 +89,15 @@ PATTERNS:
 - "solve the questions on my screen" → solve_screen_questions()
 - "read the full page" → capture_full_page()
 
-FORM FILLING (when Travis says "fill the form", "fill in the form for me", etc.):
+FORM FILLING (when the user says "fill the form", "fill in the form for me", etc.):
 
 STEP 1 — DISCOVER:
 browser_discover_form() — returns ALL fields with EXACT selectors, types, labels, values, required status.
 
 STEP 2 — FILL TEXT FIELDS:
 browser_fill_form with EXACT selectors from step 1. Example:
-  browser_fill_form(fields={"#first_name": "Angelo", "input[name='email']": "angeloasante958@gmail.com"})
-Travis's details:
-  First Name: Angelo | Last Name: Asante | Email: angeloasante958@gmail.com
-  Phone: +447555834656 | LinkedIn: https://linkedin.com/in/angeloasante
-  GitHub: https://github.com/angeloasante | Website: https://diasporaai.com
-  Location: Plymouth, United Kingdom | Pronouns: He/Him
-  Work authorization: Yes (UK) | Visa sponsorship: No
-  How did you hear: Company website | Start date: Immediately
+  browser_fill_form(fields={"#first_name": "<first name>", "input[name='email']": "<email>"})
+{form_identity_block}
 
 STEP 3 — FILL CHECKBOXES, DROPDOWNS, RADIO BUTTONS, YES/NO:
 These are often missed. Go through EVERY field from discover_form:
@@ -91,7 +105,7 @@ These are often missed. Go through EVERY field from discover_form:
   - Dropdowns/selects: browser_fill_form(fields={"#country": "United Kingdom"}) — use option text
   - Radio buttons: browser_fill_form(fields={"input[name='auth'][value='yes']": "true"})
   - Yes/No buttons: browser_click on the appropriate button selector
-Do NOT skip any field. If a field has options listed, pick the best match from Travis's details.
+Do NOT skip any field. If a field has options listed, pick the best match from the user's details above.
 
 STEP 4 — UPLOAD:
 browser_upload for any file input (if CV needed, generate_pdf first).
@@ -106,13 +120,13 @@ browser_discover_form() again. Look at EVERY field:
 
 BAIL-OUT RULE: If after 2 verify+fill cycles the SAME fields are still unfilled, STOP. Some fields are custom components that can't be filled via JS. Report what you filled and what you couldn't — don't loop forever.
 
-NEVER ask Travis for his details — you already know them. Just fill and verify.
+If a needed detail (e.g. visa status, start date) is NOT listed in the user's details above, ASK the user before filling.
 NEVER guess selectors — only use what browser_discover_form returns.
 NEVER stop after text fields — checkboxes and dropdowns are just as important.
 
 LOGIN FLOW (critical — follow exactly):
 When browser_navigate returns data with "login_required": true:
-1. Tell Travis: "This needs a login. I've opened the browser — log in there and I'll wait."
+1. Tell the user: "This needs a login. I've opened the browser — log in there and I'll wait."
 2. Call browser_wait_for_login() — this watches until login completes.
 3. After login succeeds, continue with the original task (navigate to the page, screenshot, etc.)
 4. The session is saved permanently — next time, no login needed.
@@ -139,26 +153,73 @@ end tell
 After tool results come back, summarise what happened clearly."""
 
 
+def _form_identity_block() -> str:
+    """Render the user's personal details for form-filling. Pulled from USER config.
+
+    Returns a block the form-filler can read. If the user isn't configured,
+    returns instructions to ask them.
+    """
+    from friday.core.user_config import USER
+    if not USER.is_configured:
+        return ("The user's details (name, email, phone, etc.) are NOT configured. "
+                "Before filling personal fields, ASK the user for the details you need.")
+    parts = [f"{USER.display_name}'s details (from ~/.friday/user.json):"]
+    if USER.name:
+        parts.append(f"  Name: {USER.name}")
+    if USER.email:
+        parts.append(f"  Email: {USER.email}")
+    if USER.phone:
+        parts.append(f"  Phone: {USER.phone}")
+    if USER.github:
+        parts.append(f"  GitHub: https://github.com/{USER.github}")
+    if USER.website:
+        parts.append(f"  Website: {USER.website}")
+    if USER.location:
+        parts.append(f"  Location: {USER.location}")
+    return "\n".join(parts)
+
+
+def get_system_prompt() -> str:
+    return _BASE_PROMPT.replace("{form_identity_block}", _form_identity_block())
+
+
+SYSTEM_PROMPT = get_system_prompt()
+
+
 class SystemAgent(BaseAgent):
     name = "system_agent"
     system_prompt = SYSTEM_PROMPT
     max_iterations = 5
 
     def __init__(self):
-        # Core tools — always available (8 tools)
+        # Refresh prompt so Settings UI edits take effect without restart.
+        self.system_prompt = get_system_prompt()
+        # Core tools — always available. Keep in sync with tool_dispatch.TOOL_NAMES.
         self.tools = {
-            # Terminal (keep the 2 most used)
+            # Terminal
             "run_command": TERMINAL_TOOLS["run_command"],
             "run_background": TERMINAL_TOOLS["run_background"],
-            # Mac control (keep the most useful)
+            # Mac control — full mac_tools kit so the LLM has every verb available
             "open_application": MAC_TOOLS["open_application"],
+            "close_application": MAC_TOOLS["close_application"],
+            "type_text": MAC_TOOLS["type_text"],
             "take_screenshot": MAC_TOOLS["take_screenshot"],
             "get_system_info": MAC_TOOLS["get_system_info"],
             "run_applescript": MAC_TOOLS["run_applescript"],
-            # Files (keep read + list)
+            "set_volume": MAC_TOOLS["set_volume"],
+            "toggle_dark_mode": MAC_TOOLS["toggle_dark_mode"],
+            "play_music": MAC_TOOLS["play_music"],
+            "open_url": MAC_TOOLS["open_url"],
+            # Files
             "read_file": FILE_TOOLS["read_file"],
             "list_directory": FILE_TOOLS["list_directory"],
         }
+        # Screen casting + extended-display placement (only if module loaded)
+        if _HAS_CAST:
+            for name in ("cast_screen_to", "stop_screencast",
+                          "open_on_extended_display", "list_displays"):
+                if name in CAST_TOOLS:
+                    self.tools[name] = CAST_TOOLS[name]
         super().__init__()
 
     async def run(self, task: str, context: str = "", on_tool_call=None, on_chunk=None):
@@ -168,7 +229,12 @@ class SystemAgent(BaseAgent):
         task_lower = task.lower()
         browser_keywords = ["browser", "navigate", "webpage", "website", "click",
                             "open page", "go to", "browse", "screenshot page",
-                            "linkedin", "twitter", "github.com", "login", "log in"]
+                            "linkedin", "twitter", "github", "login", "log in",
+                            "netflix", "youtube", "reddit", "instagram", "facebook",
+                            "google", "search for", "google search",
+                            "on my browser", "in my browser",
+                            "open the browser", "in chrome", "in safari", "in firefox",
+                            ".com", ".org", ".net", ".io"]
 
         # Form-filling keywords — triggers batch browser tools + higher iteration limit
         form_keywords = ["fill form", "fill the form", "fill in the form", "fill in form",

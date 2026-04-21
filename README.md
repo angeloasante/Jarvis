@@ -23,7 +23,7 @@
 
 Tony Stark had JARVIS. This is FRIDAY.
 
-Not a demo. Not a wrapper around ChatGPT. A personal AI OS built from scratch — local inference, persistent memory, smart home control, browser automation, email, calendar, iMessage, X, job applications, a hologram display if you're into that.
+Not a demo. Not a wrapper around ChatGPT. A personal AI OS built from scratch — local inference, persistent memory, smart home control, gesture control via your camera, browser automation, email, calendar, iMessage, WhatsApp, X, job applications, a hologram display if you're into that.
 
 You talk to it in whatever way you talk. It gets things done without you having to explain yourself twice.
 
@@ -78,34 +78,105 @@ That last one actually happened. 2:50am. Father-in-law sent a LeBron reaction im
 - **Python 3.12+**
 - **uv** — Python package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
 
-### Setup
+### Install
+
+**Option 1 · one-liner (recommended)**
 
 ```bash
-# 1. Clone the repo
-git clone <https://github.com/angeloasante/Jarvis.git> && cd JARVIS
-
-# 2. Install dependencies
-uv sync
-
-# 3. Create your .env file
-echo 'TAVILY_API_KEY=your-key-here' > .env
+curl -fsSL https://raw.githubusercontent.com/angeloasante/Jarvis/main/install.sh | sh
 ```
+
+Installs `uv` if you don't have it, installs FRIDAY into an isolated tool environment, and kicks off `friday onboard`. No system Python needed — uv brings its own. Read the script first (it's short): [install.sh](install.sh).
+
+**Option 2 · uv (already have it)**
+
+```bash
+uv tool install friday-os      # from PyPI (once released)
+# or, today, before the PyPI release:
+uv tool install "friday-os @ git+https://github.com/angeloasante/Jarvis"
+friday onboard
+friday
+```
+
+**Option 3 · pipx**
+
+```bash
+pipx install friday-os         # or: pipx install git+https://github.com/angeloasante/Jarvis
+friday onboard
+friday
+```
+
+**Option 4 · plain pip**
+
+```bash
+pip install --user friday-os   # leaks into your user Python — fine but less isolated
+friday onboard
+friday
+```
+
+Any of these put the `friday` command on your PATH. `friday onboard` is the one-stop wizard — it asks **QuickStart vs Advanced** up front, then walks through:
+
+1. **Profile** — name, bio, tone → `~/Friday/user.json`
+2. **System deps** — detects Python/`uv`/`ollama`/`node`/`ngrok`/`brew`, offers to brew-install anything missing
+3. **LLM provider** — pick OpenRouter (with a live model picker from `openrouter.ai/api/v1/models`), Groq, or skip for local Ollama
+4. *(Advanced only)* Gmail + Calendar, Twilio SMS, Voice, Hand gestures
+5. **Health check** — runs `friday doctor` to confirm everything
+
+Re-running is safe: existing config is preserved unless you explicitly overwrite it.
+
+**Option 5 · from source (for contributors)**
+
+```bash
+git clone https://github.com/angeloasante/Jarvis.git && cd JARVIS
+uv sync
+uv run friday onboard
+uv run friday
+```
+
+Either way, your whole setup — identity, tone, slang, contact aliases, CV, briefing watchlist — lives in **`~/Friday/user.json`**. One file, visible in Finder, chmod 600. FRIDAY injects it into the model's context on every turn, so the assistant always knows who you are, what you're building, and how you want to be talked to.
+
+- Edit it any time: `friday config edit`
+- See it in Finder: `friday config open`
+- Mac app equivalent: **Settings → Profile**
+
+On first run, if the file doesn't exist, FRIDAY runs the wizard before starting.
 
 Now pick how you want FRIDAY to think:
 
-### Option A: Cloud via Groq (Recommended)
+### Option A: Cloud via OpenRouter (Recommended)
 
-Fast. Qwen3-32B at 535 tok/s, sub-100ms latency, ~6.5s average response. Free tier available.
+Gemma 4 31B — 97% tool calling accuracy on FRIDAY's own benchmarks. Cheaper than Groq (~$3.43/month). Free tier available.
 
 ```bash
-# Add your Groq API key — get one free at https://console.groq.com
-echo 'GROQ_API_KEY=gsk_your_key_here' >> .env
+# Add your OpenRouter key — get one free at https://openrouter.ai/settings/keys
+echo 'OPENROUTER_API_KEY=sk-or-v1-your_key_here' >> .env
 
 # Run FRIDAY
 uv run friday
 ```
 
-That's it. No models to download, no GPU needed. If Groq goes down mid-session, FRIDAY silently falls back to local Ollama (if installed).
+That's it. No models to download, no GPU needed. FRIDAY auto-detects the provider from your API key.
+
+### Option A2: Cloud via Groq (Fastest)
+
+Qwen3-32B at 535 tok/s, sub-100ms latency. Faster than OpenRouter but lower tool accuracy. Good if speed matters more than correctness.
+
+```bash
+echo 'GROQ_API_KEY=gsk_your_key_here' >> .env
+uv run friday
+```
+
+### Any OpenAI-Compatible Provider
+
+FRIDAY works with any provider that speaks the OpenAI API — Together AI, Fireworks, RunPod, your own vLLM deployment. Set these in `.env`:
+
+```bash
+CLOUD_API_KEY=your_key
+CLOUD_BASE_URL=https://api.together.xyz/v1
+CLOUD_MODEL=google/gemma-4-31B-it
+```
+
+If multiple keys are set, priority is: `CLOUD_API_KEY` (manual) > `OPENROUTER_API_KEY` > `GROQ_API_KEY` > local Ollama fallback.
 
 ### Option B: Fully Local via Ollama
 
@@ -129,7 +200,7 @@ Set `GROQ_API_KEY` **and** have Ollama running. FRIDAY uses Groq for speed, fall
 
 ### Switching Between Modes
 
-Add or remove `GROQ_API_KEY` from `.env` and restart FRIDAY. That's it. No code changes, no config flags.
+Add or remove the API key from `.env` and restart FRIDAY. That's it. No code changes, no config flags. FRIDAY auto-detects which provider is available.
 
 ### Voice Mode
 
@@ -205,6 +276,47 @@ node server.js
 
 After pairing, the session persists — restart the bridge anytime without re-scanning. For background running, auto-start on login, and troubleshooting — see [docs/whatsapp-setup.md](docs/whatsapp-setup.md).
 
+### SMS Setup (Text FRIDAY From Anywhere)
+
+FRIDAY has a Twilio phone number. Text it from any phone on any network — no app, no WhatsApp, no iMessage required.
+
+```bash
+# 1. Add Twilio credentials to .env
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_AUTH_TOKEN=your_auth_token_here
+TWILIO_PHONE_NUMBER=+447367000489   # Your Twilio number
+
+# 2. Install Tailscale (stable public URL, free)
+brew install --cask tailscale
+tailscale login
+tailscale funnel 3200   # First time: approve Funnel in browser
+
+# 3. Set webhook in Twilio Console:
+#    Phone Numbers → your number → Messaging → Webhook:
+#    https://your-machine.tailnet.ts.net/sms  (HTTP POST)
+
+# 4. Start FRIDAY — SMS server + Funnel start automatically
+uv run friday
+```
+
+Text your Twilio number and FRIDAY replies. It processes through the full pipeline — same routing, same agents, same personality as CLI and voice.
+
+For detailed architecture, troubleshooting, and cost breakdown — see [docs/sms-setup.md](docs/sms-setup.md).
+
+### macOS App
+
+There's a native SwiftUI app wrapping all of this — menu bar bolt, full-window chat with sidebar and streaming token-by-token responses, an onboarding flow that handles Google sign-in and LLM key entry, and a bundled Python 3.12 runtime so end users don't need `uv` or the repo at all. Shared keys (Tavily) ship with the app; per-user keys (OpenRouter, Twilio, X) get entered once in the GUI and persist in Keychain.
+
+```bash
+# Dev: run against the repo
+open Friday-mac/Friday/Friday.xcodeproj    # ⌘R in Xcode
+
+# Release: produce a self-contained .app
+cd Friday-mac && ./build_bundle.sh release
+```
+
+Architecture, menu bar integration, NDJSON streaming protocol, onboarding flow, reset procedure, and build pipeline — see [docs/mac-app.md](docs/mac-app.md). Product spec (wow moments, feature roadmap, iOS app) — see [docs/app-spec.md](docs/app-spec.md).
+
 ---
 
 ## Architecture
@@ -238,7 +350,9 @@ User Input (CLI / Voice)
     ▼         ▼         ▼         ▼         ▼         ▼         ▼         ▼         ▼         ▼
  File I/O  Tavily    ChromaDB  Gmail API AppleScript LG WebOS  Web fetch Monitors  CV Data   X API
  Terminal  httpx     SQLite    Calendar  Playwright  WakeOnLan Scheduler Emails    WeasyPrint tweepy
- Git       Known src Semantic  Drafts    Chrome,PDF  Smart Home Diffing  Calendar  Jinja2    Mentions
+ Git       Known src Semantic  iMessage  Chrome,PDF  Smart Home Diffing  Calendar  Jinja2    Mentions
+                               WhatsApp                                            Twilio SMS
+                               Twilio SMS
                                   │                                        │
                                   └── asyncio.gather() ────────────────────┘
                                       (parallel tool execution)
@@ -314,6 +428,7 @@ JARVIS/
 │   │   ├── calendar_tools.py  # macOS/iCloud Calendar read + create events
 │   │   ├── imessage_tools.py  # iMessage read/send + FaceTime + Contacts
 │   │   ├── whatsapp_tools.py  # WhatsApp read/send/search via Baileys bridge
+│   │   ├── sms_tools.py       # Twilio SMS send/read (text FRIDAY from anywhere)
 │   │   ├── cron_tools.py      # Scheduled task CRUD (create, list, delete, toggle)
 │   │   ├── watch_tools.py     # Standing orders — create, list, cancel watch tasks
 │   │   ├── notify.py          # Phone notifications via iMessage to self
@@ -342,12 +457,23 @@ JARVIS/
 │   ├── whatsapp/
 │   │   ├── server.js          # Baileys HTTP bridge (Express + WhatsApp Web)
 │   │   └── package.json       # Node.js dependencies
+│   ├── sms/
+│   │   ├── __init__.py        # Package init
+│   │   └── server.py          # Twilio SMS webhook server (port 3200)
 │   └── skills/                # (Phase 5 — knowledge docs for agents)
 ├── Idea/                      # Design docs, system maps, tool specs
+├── Friday-mac/                 # Native SwiftUI macOS app (menu bar + chat window)
+│   ├── Friday/Friday/          # Swift sources (app, chat, onboarding, services)
+│   ├── build_bundle.sh         # Bundles Python 3.12 + FridayCore into Friday.app
+│   └── README.md               # Xcode setup + build instructions
 ├── docs/
 │   ├── progress.md            # Development log
+│   ├── mac-app.md             # macOS app + menu bar architecture
+│   ├── app-spec.md            # Product spec for Mac + iOS apps
 │   ├── ollama-setup.md        # Local LLM setup guide (Ollama)
 │   ├── whatsapp-setup.md      # WhatsApp integration setup (Baileys bridge)
+│   ├── sms-setup.md           # SMS integration setup (Twilio + Tailscale)
+│   ├── gesture-control.md     # MediaPipe gesture control
 │   ├── friday-glasses-integration.md  # Halo glasses integration spec
 │   └── background/
 │       └── monitor_scheduler.py # APScheduler background monitor jobs
@@ -414,7 +540,7 @@ The brain's filing system. Stores decisions, lessons, and context for future rec
 
 The mouth and schedule. Handles email, calendar, iMessage, FaceTime, and contacts.
 
-**Tools:** `read_emails`, `search_emails`, `read_email_thread`, `send_email`, `draft_email`, `send_draft`, `edit_draft`, `get_calendar`, `create_event`, `read_imessages`, `send_imessage`, `start_facetime`, `search_contacts`, `send_whatsapp`, `read_whatsapp`, `search_whatsapp`, `whatsapp_status`
+**Tools:** `read_emails`, `search_emails`, `read_email_thread`, `send_email`, `draft_email`, `send_draft`, `edit_draft`, `get_calendar`, `create_event`, `read_imessages`, `send_imessage`, `start_facetime`, `search_contacts`, `send_whatsapp`, `read_whatsapp`, `search_whatsapp`, `whatsapp_status`, `send_sms`, `read_sms`
 
 **Capabilities:**
 - Read, search, and triage Gmail (priority-sorted: critical → high → normal)
@@ -426,6 +552,7 @@ The mouth and schedule. Handles email, calendar, iMessage, FaceTime, and contact
 - **FaceTime** — initiate video/audio calls, multi-number contact handling
 - **Contacts** — search Contacts.app with fuzzy matching, nickname resolution, emoji support
 - **WhatsApp** — read chats, send messages, search across conversations via local Baileys bridge (Node.js)
+- **SMS** — send/receive texts via Twilio from any phone. Inbound SMS processed through full FRIDAY pipeline via webhook server + Tailscale Funnel
 - **Smart contact resolution** — "Ellen's pap", "my bby", "father in law" all resolve correctly via word-overlap scoring
 - **NSAttributedString parsing** — extracts text from newer iMessage binary format (`attributedBody`)
 - **Channel-aware** — after reading iMessages, replies go via `send_imessage` (never `draft_email`)
@@ -435,7 +562,7 @@ The mouth and schedule. Handles email, calendar, iMessage, FaceTime, and contact
 
 **Safety gates:** `send_email`, `send_draft`, `send_imessage`, `send_whatsapp`, and `create_event` all require `confirm=True`. FRIDAY always previews before acting.
 
-**Setup:** Email requires Google OAuth2 — see [Google API Setup](#google-api-setup) below. Calendar, iMessage, FaceTime, and Contacts work out of the box (native macOS APIs, no API keys needed). iMessage reading requires Full Disk Access for `chat.db`. WhatsApp requires the Baileys bridge — see [docs/whatsapp-setup.md](docs/whatsapp-setup.md).
+**Setup:** Email requires Google OAuth2 — see [Google API Setup](#google-api-setup) below. Calendar, iMessage, FaceTime, and Contacts work out of the box (native macOS APIs, no API keys needed). iMessage reading requires Full Disk Access for `chat.db`. WhatsApp requires the Baileys bridge — see [docs/whatsapp-setup.md](docs/whatsapp-setup.md). SMS requires Twilio + Tailscale — see [docs/sms-setup.md](docs/sms-setup.md).
 
 ### System Agent
 
@@ -915,6 +1042,73 @@ Works with any format FRIDAY can read: `.docx`, `.md`, `.txt`.
 
 ---
 
+## Gesture Control
+
+Raise your hand. FRIDAY reacts. Two hands, pinch drag, combos — 29 gestures total. MediaPipe runs locally on your MacBook camera, zero GPU, 30fps. Hold a gesture for 0.4 seconds and it fires through the normal FRIDAY pipeline.
+
+**Right Hand:**
+| | Gesture | Command |
+|---|---------|---------|
+| ✊ | Closed Fist | mute |
+| 🖐 | Open Palm | unmute |
+| 👆 | Point Up | volume up |
+| 👍 | Thumb Up | play |
+| 👎 | Thumb Down | volume down |
+| ✌️ | Victory / Peace | pause |
+| 🤟 | ILoveYou (thumb+index+pinky) | catch me up |
+| 🤌 | Pinch (thumb+index touching) | what's on my screen |
+
+**Left Hand:**
+| | Gesture | Command |
+|---|---------|---------|
+| ✊ | Closed Fist | privacy mode |
+| 🖐 | Open Palm | catch me up |
+| 👆 | Point Up | brightness up |
+| 👍 | Thumb Up | save to memory |
+| 👎 | Thumb Down | forget that |
+| ✌️ | Victory / Peace | read this |
+| 🤟 | ILoveYou | evening briefing |
+| 🤌 | Pinch | screenshot |
+
+**Both Hands:**
+| | Gesture | Command |
+|---|---------|---------|
+| ✊✊ | Both Fists | silence everything |
+| 🖐🖐 | Both Palms | full attention |
+| 👍👍 | Both Thumbs Up | send it |
+| 👎👎 | Both Thumbs Down | cancel everything |
+| ✌️✌️ | Both Victory | screenshot and tweet |
+| 🤟🤟 | Both ILoveYou | party mode |
+| ✊🖐 | Right Fist + Left Palm | i'm leaving |
+| 🖐✊ | Right Palm + Left Fist | i'm back |
+
+**Pinch Drag (continuous — move while pinching):**
+| | Gesture | Command |
+|---|---------|---------|
+| 🤌☝️ | Right pinch + drag up | volume up |
+| 🤌👇 | Right pinch + drag down | volume down |
+| 🤌☝️ | Left pinch + drag up | brightness up |
+| 🤌👇 | Left pinch + drag down | brightness down |
+
+Every gesture is customizable from `.env` — no code to edit. If you can type it as a FRIDAY command, you can gesture it.
+
+**Setup:**
+```bash
+# Download gesture model (8MB, one time)
+mkdir -p ~/.friday/models
+curl -sL -o ~/.friday/models/gesture_recognizer.task \
+  "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/latest/gesture_recognizer.task"
+
+# Enable in .env
+echo "FRIDAY_GESTURES=true" >> .env
+```
+
+Toggle at runtime with `/gestures`. Voice and gestures work simultaneously — independent threads, same FridayCore.
+
+Full docs: [docs/gesture-control.md](docs/gesture-control.md)
+
+---
+
 ## Screen Vision & Question Solver
 
 Ask FRIDAY to look at your screen — read text, understand what's on it, or solve every question on a page. On-command only, never watches passively. Privacy-gated behind `FRIDAY_SCREEN_ACCESS=true` in `.env`.
@@ -971,12 +1165,37 @@ Without the vision model, FRIDAY can still read all text on screen (OCR) and ans
 
 ## CLI Commands
 
+### Shell commands (outside the REPL)
+
+| Command | Description |
+|---------|-------------|
+| `friday` | Launch the REPL (runs `friday init` on first run) |
+| `friday onboard` | Full guided setup — QuickStart or Advanced |
+| `friday init` | Interactive profile wizard (name, bio, tone → `user.json`) |
+| `friday doctor` | Audit every integration + system dependency |
+| `friday config [show\|edit\|path\|open]` | Inspect / edit `~/Friday/user.json` |
+| `friday setup deps` | Detect and brew-install missing system tools |
+| `friday setup openrouter` | Paste key, optionally pick a model from the live catalogue |
+| `friday setup groq` | Paste Groq key |
+| `friday setup tavily` | Paste Tavily key (web search) |
+| `friday setup elevenlabs` | Paste ElevenLabs key (cloud TTS) |
+| `friday setup x` | Paste X / Twitter tokens |
+| `friday setup gmail` | Open GCP credentials page + log in via OAuth |
+| `friday setup twilio` | Paste SID / token / phone — 4 fields |
+| `friday setup voice` | Toggle voice, optionally wire ElevenLabs |
+| `friday setup gestures` | Download MediaPipe model + enable gestures |
+| `friday test llm\|gmail\|twilio\|tv` | Connectivity check for each integration |
+| `friday heartbeat` | Explain background watches + list active ones |
+
+### In-REPL slash commands
+
 | Command | Description |
 |---------|-------------|
 | `/quit` | Exit FRIDAY |
 | `/clear` | Reset conversation history |
 | `/memory` | Show recent stored memories |
 | `/voice` | Toggle voice pipeline on/off |
+| `/gestures` | Toggle gesture control on/off |
 | `/listening-off` | Pause ambient listening |
 | `/listening-on` | Resume ambient listening |
 | `/clearwatches` | Kill all active watch tasks |
@@ -985,12 +1204,17 @@ Without the vision model, FRIDAY can still read all text on screen (OCR) and ans
 
 ## Personality
 
-FRIDAY isn't generic. It's built for Travis — a Ghanaian founder based in Plymouth, UK who builds at 2-4am. It understands:
+FRIDAY is **not a fixed character**. The voice comes from `~/Friday/user.json`:
 
-- **Ghanaian expressions** — "hawfar", "oya", "chale", "e no do", "time no dey", "sharp sharp"
-- **Energy matching** — casual gets casual, urgent gets urgent
-- **No corporate tone** — no "Certainly!", no bullet-point self-descriptions, no fluff
-- **2am rule** — late night = less polish, more honest
+- **`name`** — how it addresses you
+- **`bio`** — one-line self-description injected into the personality
+- **`tone`** — free-form note ("direct, dry humour", "warm, patient", etc.)
+- **`slang`** — vocabulary the model treats as understood (won't translate back)
+- **`contact_aliases`** — nickname → real-person mappings for messaging
+- **`briefing_watchlist`** — X handles and topics to surface in daily briefings
+- **`cv`** — full CV (experience, projects, skills, education) — used for job applications AND injected into every system prompt so the assistant answers grounded in who you actually are
+
+The example in [`docs/user.example.json`](docs/user.example.json) shows the shape. A richer personalised setup feels like this:
 
 ```
 ▶ hawfar
@@ -1003,13 +1227,17 @@ FRIDAY isn't generic. It's built for Travis — a Ghanaian founder based in Plym
   FRIDAY  Sharp sharp. What's the priority.
 ```
 
+Same FRIDAY, different user — slang block populated with the user's own vocabulary, tone note steering register. Nothing in the prompt text says "Travis" or "Ghanaian" unless `user.json` says so.
+
+See [`docs/user-config.md`](docs/user-config.md) for every field.
+
 ---
 
 ## Tech Stack
 
 | Component | Technology | Why |
 |-----------|-----------|-----|
-| **LLM (cloud)** | Qwen3-32B via Groq | 32B params, sub-100ms latency, 535 tok/s, OpenAI-compatible API |
+| **LLM (cloud)** | Gemma 4 31B via OpenRouter (default), Qwen3-32B via Groq (backup) | 97% tool accuracy, provider-agnostic — any OpenAI-compatible API works |
 | **LLM (local)** | Qwen3.5-9B via Ollama | 9B params, fully offline fallback, thinking toggle, Apache 2.0 |
 | **Package Manager** | uv | 10-100x faster than pip |
 | **Web Search** | Tavily | Built for AI agents, returns structured data, AI answers |
@@ -1024,6 +1252,7 @@ FRIDAY isn't generic. It's built for Travis — a Ghanaian founder based in Plym
 | **Contacts** | AppleScript Contacts.app | Fuzzy search, nickname resolution, emoji support |
 | **Cron/Scheduler** | APScheduler CronTrigger + SQLite | User-defined scheduled tasks, persistent across restarts |
 | **Standing Orders** | APScheduler (30s ticks) + SQLite + LLM reasoning | Watch iMessages (auto-reply), emails, missed calls, browser pages — type-classified dispatch |
+| **SMS** | Twilio + Tailscale Funnel | Text FRIDAY from any phone, webhook server on port 3200, stable public URL |
 | **Phone Notifications** | iMessage to self | Instant alerts to iPhone, DND bypass capable |
 | **Screen Vision & Solver** | Apple Vision (Swift OCR) + Qwen2.5-VL (Ollama) | Screen reading, full-page scroll+OCR, question solver → formatted .docx |
 | **Browser Automation** | Safari (Selenium) + Playwright fallback | Safari = your sessions/cookies, no login walls. Playwright fallback for headless. |
@@ -1137,10 +1366,12 @@ FRIDAY isn't generic. It's built for Travis — a Ghanaian founder based in Plym
 - [x] Deflection rules — never agrees to calls, money, or plans. Deflects casually.
 - [x] Watch deduplication — updating a watch for the same contact modifies the existing one, no duplicates
 - [x] Baseline-first — first tick records state, only replies on genuinely new messages after watch creation
-- [x] **Watch type classification** — keyword dispatch to iMessage, email, calls, or browser executors
+- [x] **Universal watch system** — keyword dispatch to iMessage, WhatsApp, email, calls, URL, search, topic, or browser executors
 - [x] **Email watch** — reads unread emails, filters by sender keyword, notifies on new matches
 - [x] **Call log watch** — reads missed calls, fingerprints latest, notifies on new missed calls
 - [x] **Browser watch** — opens URL via Playwright, hashes page content, LLM summarizes changes
+- [x] **URL/search/topic watch** — web page diffing, recurring web searches, topic monitoring with materiality detection
+- [x] **WhatsApp watch** — monitors WhatsApp messages, auto-replies with same standing order system as iMessage
 - [x] Phone notifications — iMessage to self, instant delivery, works with DND bypass
 - [x] `/clearwatches` CLI command — kill all active watches instantly
 - [x] All background systems boot automatically on CLI startup
@@ -1148,18 +1379,65 @@ FRIDAY isn't generic. It's built for Travis — a Ghanaian founder based in Plym
 - [x] **Full-page question solver** — "solve the questions on Safari", scrolls entire page, OCRs + deduplicates, solves all questions, saves formatted .docx with app targeting and viewport-only mode
 - [x] **Multi-agent deep research** — parallel sub-agents (search + fetch + read + write), phased execution, produces real documents saved to disk
 
-### Phase 5 — Intelligence
-- [ ] Skill system (knowledge docs agents read before executing)
-- [ ] Fine-tuning data collection from sessions
+### Phase 4.7 — Gesture Control (Complete)
+- [x] MediaPipe GestureRecognizer — 7 built-in gestures per hand, two-hand detection
+- [x] **29 total gestures**: 8 right, 8 left, 7 both hands, 2 mixed combos, 4 pinch drag
+- [x] Custom pinch detection — thumb + index tip distance from landmarks
+- [x] **Pinch drag** — continuous control (volume slider in mid-air, Iron Man style)
+- [x] **100% `.env` configured** — every gesture, timing, and threshold customizable without touching code
+- [x] **Wrist-based handedness** — uses wrist x-position instead of MediaPipe's unreliable classifier for left/right
+- [x] **Two-hand frame buffer** — 0.4s buffer merges hands from consecutive frames for reliable combos
+- [x] `/gestures-on`, `/gestures-off`, `/gestures` toggle + `/help` command listing all controls
+- [x] Daemon thread architecture — same pattern as voice pipeline, runs alongside voice simultaneously
+- [x] Hold threshold (0.4s) + cooldown (1.5s) + grace window (0.3s) for flicker tolerance
+- [x] Commands routed through fast_path (sub-second TV control) or agent dispatch (briefings)
+- [x] C++ log suppression (MediaPipe/TFLite noise silenced at fd level)
+- [x] `/gestures` CLI toggle + `FRIDAY_GESTURES=true` env flag
+- [x] Zero GPU — runs on CPU at 30fps via TFLite XNNPACK
+
+### Phase 5 — Skills & Intelligence (In Progress)
+- [x] **Skill system** — markdown SKILL.md files (same format as OpenClaw/ClawHub) that agents load before executing
+- [x] Skill loader discovers skills from `friday/skills/` (repo) + `~/.friday/skills/` (personal)
+- [x] YAML frontmatter: name, description, agents (which agents load it)
+- [x] `agents: all` = every agent, `agents: [job_agent, research_agent]` = specific
+- [x] **14 skills shipped**: proactive-execution, adaptive-reasoning, memory-first, self-improving, web-research, job-analysis, youtube-watcher, humanize-text, browser-use, pdf-toolkit, image-tools, powerpoint, code-workflow, marketing-strategy
+- [x] **Proactive execution** — never ask "should I proceed?", chain steps automatically
+- [x] **Adaptive reasoning** — score task complexity 0-10, match effort to difficulty
+- [x] **Memory first** — check memory before searching web, never say "I don't have info" without searching
+- [x] **Self-improving** — learn from corrections, store preferences, record successful patterns
+- [x] **Web research** — fetch URL flow with JS fallback, search-before-answering pattern
+- [x] **Job analysis** — fetch posting → check memory for projects → score fit → rank projects → give verdict
+- [x] **YouTube watcher** — fetch video transcripts via yt-dlp, summarize, answer questions about videos
+- [x] **Humanize text** — strip AI patterns (delve, tapestry, "I'd be happy to"), match Travis's writing style
+- [x] **Browser use** — snapshot→act→verify pattern, form filling best practices, session persistence
+- [x] **PDF toolkit** — extract text/tables, create, merge, split, rotate PDFs (pypdf, pdfplumber, WeasyPrint)
+- [x] **Image tools** — resize, compress, convert, crop images. Social media size presets (Pillow, ffmpeg)
+- [x] **PowerPoint** — create/edit PPTX presentations, pitch deck templates (python-pptx)
+- [x] **Code workflow** — structured plan→execute→verify→deliver, anti-patterns, git conventions
+- [x] **Marketing strategy** — April Dunford positioning, ICP, competitive battlecards, launch tiers, pricing
+- [x] `fetch_page` auto-fallback — detects JS-only pages, renders with browser automatically
+- [x] `youtube_transcript` tool — yt-dlp transcript extraction + metadata
+- [x] Memory seeded with corrections, patterns, and preferences from real usage
+- [x] Fine-tuning data collection from sessions (JSONL conversation logs)
 - [ ] QLoRA fine-tune on smaller model (personality + routing baked into weights)
 - [ ] Additional agents (Git, Deploy, Database)
 - [ ] Self-hosted inference on Modal/RunPod (for privacy or custom fine-tuned models)
 
-### Phase 6 — Ecosystem
+### Phase 7 — SMS & Remote Access (Complete)
+- [x] **Twilio SMS integration** — text FRIDAY from any phone, full pipeline processing, TwiML replies
+- [x] SMS webhook server on port 3200 — receives inbound, processes through FridayCore, replies
+- [x] SMS tools — `send_sms`, `read_sms` integrated into CommsAgent
+- [x] **Tailscale Funnel** — permanent public HTTPS URL, no ngrok, no dynamic DNS, free
+- [x] Auto-start — SMS server + Tailscale Funnel boot with `uv run friday`, die with Ctrl+C
+- [x] Security — allowed-numbers gate, response truncation, processing timeout
+- [x] Dual Twilio numbers — UK (+447367000489) for local, US (+17405588099) for international
+
+### Phase 8 — Ecosystem
+- [ ] **Telegram bot integration** — another remote access channel
 - [ ] FRIDAY iOS app — native push notifications via APNs, full assistant UI
-- [ ] Mac Mini server — FRIDAY runs 24/7, ngrok/tunnel for remote access
+- [ ] Mac Mini server — FRIDAY runs 24/7 on dedicated hardware
 - [ ] Redis async messaging between agents
-- [ ] MCP server integration (Twilio official MCP available)
+- [ ] MCP server integration
 - [ ] Screenpipe integration (screen context awareness)
 - [ ] Self-improving loop (auto fine-tune from corrections)
 - [ ] Multi-user support
@@ -1169,56 +1447,75 @@ FRIDAY isn't generic. It's built for Travis — a Ghanaian founder based in Plym
 
 ## Cloud Inference
 
-FRIDAY uses **Groq** for cloud inference — an OpenAI-compatible API running Qwen3-32B at 535 tokens/second with sub-100ms latency. This is what makes FRIDAY feel instant.
+FRIDAY is **provider-agnostic** — any OpenAI-compatible API works. Set one env var and go. Currently defaults to **Gemma 4 31B on OpenRouter** after extensive benchmarking.
 
 ### Why Cloud?
 
-Running Qwen3.5-9B locally on an M4 MacBook Air gave us 54s average response time. The M4 Air is fanless — under sustained LLM load, the GPU thermally throttles 2-15x. A 2-call search query took 25-45s. Agent tasks took 45-90s. Cloud inference brought the average down to **6.5s** — an 8x improvement.
+Running Qwen3.5-9B locally on an M4 MacBook Air gave us 54s average response time. The M4 Air is fanless — under sustained LLM load, the GPU thermally throttles 2-15x. Cloud inference brought the average down to **~3s** — a 15x improvement.
 
-### Why Groq?
+### Why Gemma 4?
 
-We tested 4 models across 3 providers:
+We ran a 36-query benchmark across FRIDAY's 3 LLM paths (intent classification, tool dispatch, personality chat) using the actual system prompts and tool schemas:
 
-| Model | Avg Time | Tool Accuracy | Issues |
-|-------|----------|--------------|--------|
-| Llama 3.3 70B (Groq) | 8.2s | 60% | Malformed tool calls, string-typed args, fake tool names |
-| Llama 3.1 8B (Groq) | 4.8s | 85% | Fast but wrong answers, hallucinated specs |
-| Kimi K2 (Groq) | 12.1s | 70% | Slow on follow-ups, 35-48s for some queries |
-| **Qwen3-32B (Groq)** | **6.5s** | **100%** | Zero tool call failures, best personality match |
+| Path | Qwen3-32B (Groq) | Gemma 4 31B (OpenRouter) |
+|------|-------------------|--------------------------|
+| **Classify** (16 queries) | 0/16 | **16/16** |
+| **Dispatch** (12 queries) | 6/12 | **11/12** |
+| **Chat** (8 queries) | 2/8 | **8/8** |
+| **TOTAL** | **8/36 (22%)** | **35/36 (97%)** |
+| **Avg speed** | **0.46s** | **2.95s** |
 
-Qwen3-32B won on every metric: zero tool failures, accurate search results, proper Ghanaian personality, and fast enough to feel responsive.
+Gemma 4 won on accuracy across every path. Qwen3 was faster (Groq hardware advantage) but failed on basic tool calls, leaked `<think>` blocks, produced AI slop in chat, and crashed on schema validation. Gemma followed instructions precisely without needing special tokens.
+
+### Provider Options
+
+| Provider | Model | Speed | Accuracy | Cost/month |
+|----------|-------|-------|----------|------------|
+| **OpenRouter** (default) | Gemma 4 31B | ~3s avg | **97%** | **$3.43** |
+| Groq | Qwen3-32B | ~0.5s avg | 22% (raw) | $6.82 |
+| Together AI | Gemma 4 31B | ~3s avg | 97% | $4.82 |
+| Fireworks | Gemma 4 31B | ~3s avg | 97% | $20.05 |
+| Local Ollama | Qwen3.5-9B | ~15s avg | ~70% | Free |
 
 ### How It Works
 
-All LLM calls go through `cloud_chat()` in `friday/core/llm.py`. If Groq is available, it uses the cloud. If not, it silently falls back to local Ollama. No code changes needed to switch.
+All LLM calls go through `cloud_chat()` in `friday/core/llm.py`. It auto-detects the provider from env vars and falls back gracefully.
 
 ```
 cloud_chat()
-  ├─ Groq API available? → use cloud (sub-second per call)
-  └─ No API key or network down? → fall back to local Ollama (10-25s per call)
+  ├─ OPENROUTER_API_KEY set? → OpenRouter (Gemma 4 31B, ~3s)
+  ├─ GROQ_API_KEY set?       → Groq (Qwen3-32B, ~0.5s)
+  ├─ CLOUD_API_KEY set?      → Any OpenAI-compatible endpoint
+  └─ None set?               → Local Ollama (~15s per call)
 ```
 
-### Before vs After
+### Switching Providers
 
-| Query Type | Local Ollama (M4 Air) | With Groq | Speedup |
-|-----------|----------------------|-----------|---------|
-| Greetings, TV commands | <1s | <1s | Same (no LLM) |
-| Search query (oneshot) | 25-45s | 3-5s | ~8x |
-| Research agent (2 LLM + Tavily) | 45-90s | **4-6s** | ~12x |
-| Agent task (ReAct loop) | 45-90s | 5-10s | ~9x |
-| Intent classification | 10-25s (regex only) | **~1s** (LLM) | ~15x |
-| Casual chat | 10-25s | 0.5-2s | ~10x |
-| **Average** | **~54s** | **~5s** | **~10x** |
+```bash
+# OpenRouter (recommended — best accuracy)
+echo 'OPENROUTER_API_KEY=sk-or-v1-xxx' >> .env
+
+# Groq (fastest — if speed > accuracy)
+echo 'GROQ_API_KEY=gsk_xxx' >> .env
+
+# Any provider (Together, Fireworks, RunPod, Modal, your own vLLM)
+echo 'CLOUD_API_KEY=xxx' >> .env
+echo 'CLOUD_BASE_URL=https://api.together.xyz/v1' >> .env
+echo 'CLOUD_MODEL=google/gemma-4-31B-it' >> .env
+
+# Fully local (remove all cloud keys)
+# FRIDAY uses Ollama automatically
+```
 
 ## Cloud vs Local — Your Choice
 
 FRIDAY auto-detects what's available. No config flags, no code changes — just environment variables. See [Quick Start](#quick-start) for setup.
 
 ```
-GROQ_API_KEY set?
-  ├─ Yes → cloud_chat() uses Groq API (~1s per call)
+OPENROUTER_API_KEY or GROQ_API_KEY or CLOUD_API_KEY set?
+  ├─ Yes → cloud_chat() uses cloud API (~0.5-3s per call)
   │        classify_intent() uses LLM for smart agent routing
-  │        Auto-fallback to Ollama if Groq is unreachable
+  │        Auto-fallback to Ollama if cloud is unreachable
   │
   └─ No  → cloud_chat() routes to local Ollama (~10-25s per call)
            classify_intent() skips, regex handles all routing
@@ -1241,21 +1538,27 @@ To switch: add or remove the API key from `.env` and restart FRIDAY. That's it.
 All config lives in `friday/core/config.py`:
 
 ```python
-# Cloud LLM (Groq — default, fastest)
-CLOUD_API_KEY = os.getenv("GROQ_API_KEY", "")
-CLOUD_BASE_URL = os.getenv("CLOUD_BASE_URL", "https://api.groq.com/openai/v1")
-CLOUD_MODEL_NAME = os.getenv("CLOUD_MODEL", "qwen/qwen3-32b")
-USE_CLOUD = bool(CLOUD_API_KEY)       # Auto-enable if key present
+# Cloud LLM — provider-agnostic (auto-detected from env vars)
+# Priority: CLOUD_API_KEY (manual) > OPENROUTER_API_KEY > GROQ_API_KEY > local Ollama
+CLOUD_API_KEY = ...                  # Auto-detected from env
+CLOUD_BASE_URL = ...                 # Auto-set per provider
+CLOUD_MODEL_NAME = ...               # Auto-set per provider
+USE_CLOUD = bool(CLOUD_API_KEY)
 
-# Local Ollama (fallback)
-MODEL_NAME = "qwen3.5:9b"            # Local model (used when cloud unavailable)
+# Local Ollama (fallback when no cloud key set)
+MODEL_NAME = "qwen3.5:9b"
 OLLAMA_BASE_URL = "http://localhost:11434"
 ```
 
 Environment variables (`.env`):
 ```
 TAVILY_API_KEY=your-key-here
-GROQ_API_KEY=gsk_...                 # Optional — enables cloud LLM inference
+OPENROUTER_API_KEY=sk-or-v1-...      # Recommended — Gemma 4 31B (97% accuracy, $3.43/mo)
+GROQ_API_KEY=gsk_...                 # Alternative — Qwen3-32B (fastest, $6.82/mo)
+# Or any provider:
+# CLOUD_API_KEY=xxx
+# CLOUD_BASE_URL=https://api.together.xyz/v1
+# CLOUD_MODEL=google/gemma-4-31B-it
 ELEVENLABS_API_KEY=...               # Optional — enables cloud TTS (local Kokoro fallback)
 ELEVENLABS_VOICE_ID=JBFqnCBsd6RMkjVDRZzb  # Optional — defaults to "George"
 ```
@@ -1278,20 +1581,20 @@ Google credentials (managed by `google_auth.py`):
 
 ---
 
-## Groq Pricing
+## Pricing
 
-FRIDAY uses Groq's cloud API for fast inference. Current pricing for the model we use:
+FRIDAY is provider-agnostic. Here's what each option costs based on real usage (~200 LLM calls/day):
 
-| | Qwen3-32B on Groq |
-|---|---|
-| **Input** | $0.29 / million tokens |
-| **Output** | $0.59 / million tokens |
-| **Speed** | 662 tokens/sec |
-| **Free tier** | Yes — free credits on signup |
+| Provider | Model | Input/M | Output/M | Monthly Cost | Free Tier |
+|----------|-------|---------|----------|-------------|-----------|
+| **OpenRouter** (default) | Gemma 4 31B | $0.14 | $0.40 | **$3.43** | Yes |
+| Groq | Qwen3-32B | $0.29 | $0.59 | $6.82 | Yes |
+| Together AI | Gemma 4 31B | $0.20 | $0.50 | $4.82 | Yes |
+| Local Ollama | Qwen3.5-9B | Free | Free | **$0** | N/A |
 
-**What does this cost in practice?** A typical FRIDAY query uses ~500 input tokens and ~200 output tokens. That's ~$0.0003 per query. **$1 covers ~3,000 queries.** The free tier is more than enough for personal use.
+**What does this cost in practice?** A typical FRIDAY query uses ~3,500 input tokens and ~200 output tokens. On OpenRouter that's ~$0.0006 per query. **$1 covers ~1,700 queries.** The free tier is more than enough for personal use.
 
-Sign up at [console.groq.com](https://console.groq.com) — no credit card required for the free tier.
+Sign up at [openrouter.ai](https://openrouter.ai) — free credits on signup, no credit card required.
 
 ---
 

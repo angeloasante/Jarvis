@@ -62,9 +62,9 @@ async def direct_briefing(conversation: list[dict], on_status=None) -> str:
     summary_parts = _build_summary(results)
     tool_data = "\n\n".join(summary_parts)
 
-    briefing_slim = """You are FRIDAY. Synthesize this data into a tight briefing for Travis.
+    briefing_slim = """You are FRIDAY. Synthesize this data into a tight briefing for the user.
 Lead with anything urgent. Then anything worth knowing. Max 150 words.
-Be direct, no fluff. Use Travis's voice — casual, real."""
+Be direct, no fluff. Use the user's voice — casual, real."""
     messages = [
         {"role": "system", "content": briefing_slim},
         {"role": "user", "content": f"Briefing data:\n\n{tool_data}"},
@@ -124,9 +124,9 @@ async def direct_briefing_streamed(
     summary_parts = _build_summary(results)
     tool_data = "\n\n".join(summary_parts)
 
-    briefing_slim = """You are FRIDAY. Synthesize this data into a tight briefing for Travis.
+    briefing_slim = """You are FRIDAY. Synthesize this data into a tight briefing for the user.
 Lead with anything urgent. Then anything worth knowing. Max 150 words.
-Be direct, no fluff. Use Travis's voice — casual, real."""
+Be direct, no fluff. Use the user's voice — casual, real."""
     messages = [
         {"role": "system", "content": briefing_slim},
         {"role": "user", "content": f"Briefing data:\n\n{tool_data}"},

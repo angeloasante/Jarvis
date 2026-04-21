@@ -103,17 +103,9 @@ def _fast_match(task: str) -> Optional[list[tuple[str, dict]]]:
         return [("tv_mute", {"mute": True})]
 
     # ── Playback ─────────────────────────────────────────────────
-    if re.search(r"\b(pause|pause it|pause the tv)\b", t) and "play" not in t.replace("pause", ""):
-        return [("tv_play_pause", {"action": "pause"})]
-
-    if re.match(r"(resume|play|continue|unpause)", t):
-        return [("tv_play_pause", {"action": "play"})]
-
-    if re.search(r"\b(rewind|rw)\b", t):
-        return [("tv_play_pause", {"action": "rewind"})]
-
-    if re.search(r"\b(fast\s*forward|ff|skip)\b", t):
-        return [("tv_play_pause", {"action": "fastforward"})]
+    # Removed fast-path overrides — the LLM picks between tv_play_pause (TV)
+    # and play_music (Mac Music) based on the user's phrasing. Tool descriptions
+    # carry the disambiguation.
 
     # ── Screen off/on ──────────────────────────────────────────────
     if re.search(r"\b(screen off|display off|turn off.{0,10}screen)\b", t):
@@ -240,7 +232,7 @@ def _format_result(tool_name: str, result) -> str:
 
 # ── System prompt (only used for complex commands) ───────────────────────────
 
-SYSTEM_PROMPT = """You control smart devices in Travis's home.
+SYSTEM_PROMPT = """You control smart devices in the user's home.
 
 ALWAYS respond in English. Be brief — one sentence max for simple actions.
 
@@ -271,7 +263,7 @@ TV COMMANDS:
 - tv_status — get current state
 
 SEARCHING FOR SHOWS/MOVIES IN APPS:
-When Travis says "play Black Widow on Disney" or "find Iron Man on Netflix":
+When the user says "play Black Widow on Disney" or "find Iron Man on Netflix":
 1. tv_launch_app("disney") — launch the app
 2. tv_remote_button(buttons=["ok"]) — select profile
 3. Navigate to search:
@@ -295,6 +287,13 @@ class HouseholdAgent(BaseAgent):
 
     def __init__(self):
         self.tools = {**TV_TOOLS}
+        # Music control sometimes lands here via the router ("pause the music",
+        # "skip this song"). Give the LLM access so it can pick correctly.
+        try:
+            from friday.tools.mac_tools import TOOL_SCHEMAS as MAC_TOOLS
+            self.tools["play_music"] = MAC_TOOLS["play_music"]
+        except Exception:
+            pass
         super().__init__()
 
     async def run(self, task: str, context: str = "", on_tool_call=None, on_chunk=None):

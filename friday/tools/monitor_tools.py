@@ -1,6 +1,6 @@
 """Monitor tools — persistent watchers for URLs, searches, and topics.
 
-FRIDAY watches things so Travis doesn't have to.
+FRIDAY watches things so the user doesn't have to.
 Creates monitors that check on schedules, detect material changes,
 and route alerts based on importance.
 """
@@ -413,7 +413,7 @@ TOOL_SCHEMAS = {
                 "name": "create_monitor",
                 "description": (
                     "Create a persistent monitor for a topic, URL, or keyword. "
-                    "FRIDAY will alert Travis when something material changes. "
+                    "FRIDAY will alert the user when something material changes. "
                     "Use for laws, visa rules, competitor activity, funding deadlines, news topics."
                 ),
                 "parameters": {
@@ -459,7 +459,7 @@ TOOL_SCHEMAS = {
             "type": "function",
             "function": {
                 "name": "list_monitors",
-                "description": "List all active monitors Travis has set up.",
+                "description": "List all active monitors the user has set up.",
                 "parameters": {"type": "object", "properties": {}, "required": []},
             },
         },

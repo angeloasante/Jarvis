@@ -406,11 +406,17 @@ function findJidByName(name) {
     }
   }
 
-  // Prefer individual chats over groups
+  // Prefer: individual > group, has messages > empty, higher score > lower
   matches.sort((a, b) => {
     const aIsGroup = a.jid.endsWith("@g.us") ? 0 : 1;
     const bIsGroup = b.jid.endsWith("@g.us") ? 0 : 1;
     if (aIsGroup !== bIsGroup) return bIsGroup - aIsGroup;
+    // Prefer JIDs that actually have messages
+    const aMsgs = (messageStore.get(a.jid) || []).length;
+    const bMsgs = (messageStore.get(b.jid) || []).length;
+    const aHas = aMsgs > 0 ? 1 : 0;
+    const bHas = bMsgs > 0 ? 1 : 0;
+    if (aHas !== bHas) return bHas - aHas;
     return b.score - a.score;
   });
 

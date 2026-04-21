@@ -403,7 +403,7 @@ async def search_contacts(name: str) -> ToolResult:
 
         # If no results, try individual words (longest first) as fallback
         # e.g. "father in law" → try "father", "law" — catches "Father-in-Law"
-        # e.g. "Ellen's pap" → try "Ellen", "pap"
+        # e.g. "Mama's bro" → try "Mama", "bro"
         if not contacts:
             words = re.findall(r"[a-zA-Z]+", name)
             # Skip common filler words, search by meaningful ones (longest first)
@@ -456,7 +456,7 @@ def _best_contact_match(contacts: list[dict], query: str) -> dict:
     # Keep all words including "my" — it's meaningful in contact names like "My Bby"
     query_words = set(re.findall(r"[a-zA-Z]+", query.lower()))
     query_words -= {"the", "a", "an", "in", "on", "to", "of", "and", "or"}
-    # Also remove standalone "s" from possessives like "Ellen's"
+    # Also remove standalone "s" from possessives like "Mama's"
     query_words.discard("s")
 
     scored = []
@@ -688,7 +688,7 @@ async def start_facetime(
                 "needs_choice": True,
                 "recipient": display_name or recipient,
                 "numbers": numbers,
-                "message": f"{display_name or recipient} has {len(numbers)} numbers. Ask Travis which one to call, then call start_facetime again with the chosen number= parameter.",
+                "message": f"{display_name or recipient} has {len(numbers)} numbers. Ask the user which one to call, then call start_facetime again with the chosen number= parameter.",
             })
 
         # Single number — proceed
@@ -750,7 +750,7 @@ TOOL_SCHEMAS = {
             "parameters": {"type": "object", "properties": {
                 "contact": {
                     "type": "string",
-                    "description": "Filter by contact name, phone number, or email (optional — omit for all recent messages). Pass EXACTLY what the user said — e.g. 'Ellen's pap', 'my bby', 'father in law'.",
+                    "description": "Filter by contact name, phone number, or email (optional — omit for all recent messages). Pass EXACTLY what the user said — nicknames are auto-resolved by the tool (e.g. 'Mama', 'my bby', 'father in law').",
                 },
                 "limit": {
                     "type": "integer",
@@ -763,7 +763,7 @@ TOOL_SCHEMAS = {
                 "direction": {
                     "type": "string",
                     "enum": ["received", "sent"],
-                    "description": "Filter by direction: 'received' = messages FROM them TO Travis, 'sent' = messages FROM Travis TO them. Omit for both directions.",
+                    "description": "Filter by direction: 'received' = messages FROM them TO the user, 'sent' = messages FROM the user TO them. Omit for both directions.",
                 },
             }, "required": []},
         }},
@@ -800,7 +800,7 @@ TOOL_SCHEMAS = {
             "description": (
                 "Start a FaceTime call (video or audio-only). Can use phone number, "
                 "email, or contact name (auto-resolved via Contacts). If the contact "
-                "has multiple numbers, returns the list — ask Travis which one, then "
+                "has multiple numbers, returns the list — ask the user which one, then "
                 "call again with the chosen number= parameter."
             ),
             "parameters": {"type": "object", "properties": {
@@ -814,7 +814,7 @@ TOOL_SCHEMAS = {
                 },
                 "number": {
                     "type": "string",
-                    "description": "Specific phone number to call — use when contact has multiple numbers and Travis has picked one. Skips contact resolution.",
+                    "description": "Specific phone number to call — use when contact has multiple numbers and the user has picked one. Skips contact resolution.",
                 },
             }, "required": ["recipient"]},
         }},

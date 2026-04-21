@@ -31,6 +31,7 @@ Use memory to check if this problem has been solved before."""
 class CodeAgent(BaseAgent):
     name = "code_agent"
     system_prompt = SYSTEM_PROMPT
+    model = "moonshotai/kimi-k2-instruct"  # Better at code than Qwen3-32B
 
     def __init__(self):
         self.tools = {

@@ -13,9 +13,12 @@ Thin wrapper — actual logic lives in:
 
 import asyncio
 import json
+import logging
 import re
 import time
 from datetime import datetime
+
+log = logging.getLogger("friday.orchestrator")
 from typing import AsyncGenerator, Generator
 
 from friday.core.llm import cloud_chat, extract_text, extract_tool_calls, extract_stream_content
@@ -38,7 +41,7 @@ from friday.agents.deep_research_agent import DeepResearchAgent
 
 # ── Extracted modules ────────────────────────────────────────────────────────
 from friday.core.prompts import (
-    PERSONALITY, PERSONALITY_SLIM, SYSTEM_PROMPT, DISPATCH_TOOL,
+    get_personality, get_personality_slim, user_context_block, SYSTEM_PROMPT, DISPATCH_TOOL,
     SIMPLE_PATTERNS, COMPLEX_SIGNALS, needs_thinking,
 )
 from friday.core.router import (
@@ -74,6 +77,7 @@ class FridayCore:
         self._mem_processor = get_memory_processor()
         self._mem_processor.start()
         self._turn_start: float = 0  # set at beginning of each turn
+        self._last_agent: str | None = None  # for confirmation routing ("yes" → re-dispatch)
 
     def _log_and_append(self, user_input: str, response: str,
                         route: str, agent_name: str = None,
@@ -81,6 +85,12 @@ class FridayCore:
         """Append to conversation history AND write to training log."""
         self.conversation.append({"role": "user", "content": user_input})
         self.conversation.append({"role": "assistant", "content": response})
+        # Track last agent for confirmation routing
+        if agent_name:
+            self._last_agent = agent_name
+
+        # Auto-detect corrections and store them for self-improvement
+        self._auto_learn(user_input, response)
         elapsed = int((time.monotonic() - self._turn_start) * 1000) if self._turn_start else None
         log_turn(
             session_id=self.session_id,
@@ -92,12 +102,69 @@ class FridayCore:
             duration_ms=elapsed,
         )
 
+    def _auto_learn(self, user_input: str, previous_response: str):
+        """Detect corrections/complaints and auto-store them for self-improvement.
+
+        Runs after every turn. If the user is correcting FRIDAY, store what
+        went wrong so agents can avoid it next time via search_memory.
+        """
+        low = user_input.strip().lower()
+
+        # Detect correction signals
+        correction_signals = [
+            "thats not what i", "that wasnt what i", "that's not what i",
+            "that wasn't what i", "you didnt", "you didn't",
+            "not what i asked", "not what i meant", "i said",
+            "wrong", "thats wrong", "that's wrong",
+            "dumb", "stupid", "slop", "ai slop", "basic",
+            "generic", "useless", "not helpful", "doesnt answer",
+            "didn't answer", "you missed", "you forgot",
+            "stop doing that", "dont do that", "don't do that",
+            "i already told you", "how many times",
+        ]
+
+        is_correction = any(sig in low for sig in correction_signals)
+        if not is_correction:
+            return
+
+        # Get the previous FRIDAY response that's being corrected
+        prev_friday = ""
+        for msg in reversed(self.conversation[:-2]):
+            if msg["role"] == "assistant":
+                prev_friday = msg["content"][:200]
+                break
+
+        # Build the correction memory
+        correction = (
+            f"CORRECTION: When user said something similar to the previous message, "
+            f"FRIDAY responded with: \"{prev_friday}...\" "
+            f"User corrected: \"{user_input[:150]}\". "
+            f"Learn: avoid this response pattern in future."
+        )
+
+        # Store asynchronously (don't block the response)
+        try:
+            import asyncio
+            asyncio.ensure_future(self._store_correction(correction))
+        except Exception:
+            pass
+
+    async def _store_correction(self, correction: str):
+        """Store a correction in memory."""
+        try:
+            from friday.tools.memory_tools import store_memory
+            await store_memory(content=correction, category="correction", importance=8)
+            log.info(f"Self-improving: stored correction")
+        except Exception as e:
+            log.debug(f"Self-improving: failed to store correction: {e}")
+
     def _build_system_prompt(self, user_input: str) -> str:
         memory_context = self.memory.build_context(query=user_input)
         project_context = self.memory.get_project_context()
         current_time = datetime.now().strftime("%A %-I:%M%p")
         return SYSTEM_PROMPT.format(
-            personality=PERSONALITY,
+            personality=get_personality(),
+            user_context=user_context_block(),
             memory_context=memory_context,
             project_context=project_context,
             current_time=current_time,
@@ -113,8 +180,8 @@ class FridayCore:
 
     async def _fast_chat(self, user_input: str, _chunk) -> str:
         """Fast conversational response with a slim system prompt (~500 tokens)."""
-        messages = [{"role": "system", "content": PERSONALITY_SLIM}]
-        for msg in self.conversation[-4:]:
+        messages = [{"role": "system", "content": get_personality_slim()}]
+        for msg in self.conversation[-10:]:
             truncated = {**msg, "content": msg["content"][:400]}
             messages.append(truncated)
         messages.append({"role": "user", "content": user_input})
@@ -151,6 +218,18 @@ class FridayCore:
                 loop.run_until_complete(
                     self._background_work(user_input, on_update)
                 )
+                # SMS delivery — if _background_work collected chunks for SMS
+                if hasattr(self, '_sms_chunks') and self._sms_chunks:
+                    sms_text = "".join(self._sms_chunks)
+                    self._sms_chunks = []
+                    if sms_text.strip():
+                        try:
+                            from friday.tools.notify import send_result_sms
+                            sent = loop.run_until_complete(send_result_sms(sms_text))
+                            if on_update and sent:
+                                on_update("STATUS:texted you the results")
+                        except Exception:
+                            pass
                 if on_update:
                     on_update("DONE:")
             except Exception as e:
@@ -177,17 +256,45 @@ class FridayCore:
         self._turn_start = time.monotonic()
         s = user_input.strip().lower()
 
+        # ── SMS delivery flag ────────────────────────────────────────────────
+        # If user wants results texted to them, strip the SMS part from the input
+        # so the LLM formats clean content (not "I've SMSed you..."), then we
+        # send that clean content via SMS after completion.
+        _sms_delivery = "sms" in s or ("text me" in s and "imessage" not in s)
+        if _sms_delivery:
+            # Strip the SMS delivery request so LLM just formats the actual content
+            import re as _re
+            user_input = _re.sub(
+                r'\s*(?:and\s+)?(?:then\s+)?(?:sms|text)\s+(?:me|it to me|that to me)(?:\s+(?:the\s+)?results?)?\s*$',
+                '', user_input, flags=_re.IGNORECASE,
+            ).strip() or user_input
+            s = user_input.strip().lower()
+
         def _status(msg):
             if on_update:
                 on_update(f"STATUS:{msg}")
 
+        def _media(path):
+            """Emit a media file path for the UI to render as a preview."""
+            if on_update:
+                on_update(f"MEDIA:{path}")
+
+        # Collect chunks for SMS delivery
+        if _sms_delivery:
+            self._sms_chunks = []
+
         def _chunk(text):
+            if _sms_delivery:
+                self._sms_chunks.append(text)
             if on_update:
                 on_update(f"CHUNK:{text}")
 
         def _ack(msg):
             if on_update:
                 on_update(f"ACK:{msg}")
+
+        if _sms_delivery:
+            _status("will text you the results")
 
         # ── Priority 1: Briefing → direct parallel dispatch (1 LLM call) ──
         if re.match(r"(catch me up|brief me|any updates|morning brief|what did i miss)", s):
@@ -219,14 +326,18 @@ class FridayCore:
             label = override.group(1)
             _ack(f"{label} on it")
             _status(f"{label} working...")
+            streamed = {"any": False}
+            def _chunk_tracked(text):
+                streamed["any"] = True
+                _chunk(text)
             result = await self._dispatch(
                 agent_name, task, user_input,
                 on_status=lambda m: _status(m),
-                on_chunk=_chunk,
+                on_chunk=_chunk_tracked,
             )
             response_text = result.result or "Couldn't get that done."
             self._log_and_append(user_input, response_text, route="override", agent_name=agent_name, tools_called=result.tools_called)
-            if not result.result:
+            if not streamed["any"]:
                 _chunk(response_text)
             self._mem_processor.process(user_input, response_text, agent_name)
             return
@@ -235,7 +346,7 @@ class FridayCore:
         oneshot = await _try_oneshot(
             s, user_input, self.conversation,
             self.memory, self.session_id, self._mem_processor,
-            _ack, _status, _chunk,
+            _ack, _status, _chunk, _media,
         )
         if oneshot:
             return
@@ -255,7 +366,33 @@ class FridayCore:
             # direct_dispatch logs its own tool calls via memory.log_agent_call
             return
 
-        # ── Priority 3: Agent dispatch — LLM classification (Groq ~1s), regex fallback ──
+        # ── Priority 2.7: Short confirmations → re-dispatch to last agent ──
+        # "yes", "yeah", "go ahead" after an agent asked a follow-up question
+        if re.match(r"^(yes|yeah|yep|yh|ye|yea|go ahead|do it|sure|ok|okay|please|proceed|bet|say less|aight|ight)\s*[.!?]*$", s):
+            last_agent = self._last_agent
+            if last_agent:
+                label = last_agent.replace("_agent", "")
+                _ack(f"{label} on it")
+                _status(f"{label} working...")
+                streamed = {"any": False}
+                def _chunk_tracked(text):
+                    streamed["any"] = True
+                    _chunk(text)
+                result = await self._dispatch(
+                    last_agent, user_input, user_input,
+                    on_status=lambda m: _status(m),
+                    on_chunk=_chunk_tracked,
+                )
+                response_text = result.result or "Couldn't get that done."
+                self._log_and_append(user_input, response_text, route="confirmation", agent_name=last_agent, tools_called=result.tools_called)
+                if not streamed["any"]:
+                    _chunk(response_text)
+                self._mem_processor.process(user_input, response_text, last_agent)
+                return
+
+        # ── Priority 3: Agent dispatch ──
+        # LLM first (capability-aware classify prompt with hard rules, ~1s on
+        # Gemma 4). Regex fallback when cloud is offline.
         match = classify_intent(user_input, self.conversation) or match_agent(user_input, self.conversation, self.memory)
         if match:
             agent_name, task = match
@@ -263,16 +400,27 @@ class FridayCore:
             _ack(f"{label} on it")
             _status(f"{label} working...")
 
+            # Track whether the agent streamed anything via _chunk so we don't
+            # emit the full response AGAIN at the end (causing duplicates).
+            streamed = {"any": False}
+            def _chunk_tracked(text):
+                streamed["any"] = True
+                _chunk(text)
+
             result = await self._dispatch(
                 agent_name, task, user_input,
                 on_status=lambda m: _status(m),
-                on_chunk=_chunk,
+                on_chunk=_chunk_tracked,
             )
 
             response_text = result.result or "Couldn't get that done."
             self._log_and_append(user_input, response_text, route="agent", agent_name=agent_name, tools_called=result.tools_called)
-            if not result.result:
+            # Only emit the result if the agent didn't already stream it
+            if not streamed["any"]:
                 _chunk(response_text)
+            # Emit any media files produced by the agent's tools
+            for path in getattr(result, "media_paths", []) or []:
+                _media(path)
             self._mem_processor.process(user_input, response_text, agent_name)
             return
 
@@ -284,7 +432,7 @@ class FridayCore:
         # ── Priority 5: LLM routing fallback (4 LLM calls) ──
         system_prompt = self._build_system_prompt(user_input)
         messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(self.conversation[-6:])
+        messages.extend(self.conversation[-12:])
         messages.append({"role": "user", "content": user_input})
 
         response = cloud_chat(messages=messages, tools=[DISPATCH_TOOL])
@@ -546,8 +694,10 @@ class FridayCore:
         if self.conversation:
             recent = self.conversation[-6:]
             conv_lines = []
+            from friday.core.user_config import USER
+            user_role = USER.display_name
             for msg in recent:
-                role = "Travis" if msg["role"] == "user" else "FRIDAY"
+                role = user_role if msg["role"] == "user" else "FRIDAY"
                 conv_lines.append(f"{role}: {msg['content'][:300]}")
             conv_context = "Recent conversation:\n" + "\n".join(conv_lines)
 

@@ -105,16 +105,17 @@ def _extract_body(payload: dict) -> str:
 
 
 async def read_emails(
-    filter: str = "unread",
+    filter: str = "all",
     limit: int = 10,
     include_body: bool = False,
     label: str = "INBOX",
 ) -> ToolResult:
-    """Read emails from Gmail. Filter: 'unread', 'today', 'urgent', or custom Gmail query."""
+    """Read emails from Gmail. Filter: 'all' (default), 'unread', 'today', 'urgent', or any Gmail search query like 'from:devpost' or 'subject:payment'."""
     try:
         service = _get_gmail()
 
         query_map = {
+            "all": "",
             "unread": "is:unread",
             "today": "after:" + datetime.now().strftime("%Y/%m/%d"),
             "urgent": "is:unread is:important",
@@ -285,7 +286,7 @@ async def draft_email(
     subject: str,
     body: str,
 ) -> ToolResult:
-    """Create a Gmail draft. Does NOT send. Returns draft for Travis to review."""
+    """Create a Gmail draft. Does NOT send. Returns draft for the user to review."""
     try:
         service = _get_gmail()
 
@@ -478,13 +479,13 @@ TOOL_SCHEMAS = {
             "type": "function",
             "function": {
                 "name": "read_emails",
-                "description": "Read emails from Gmail. Returns structured email data sorted by priority. Filter: 'unread', 'today', 'urgent', or custom Gmail query.",
+                "description": "Read emails from Gmail. Returns structured email data sorted by priority. When the user asks about a SPECIFIC email (e.g. 'check the devpost mail'), use filter='from:devpost' to search ALL emails — do NOT default to unread.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "filter": {
                             "type": "string",
-                            "description": "Filter: 'unread', 'today', 'urgent', or Gmail search query (e.g. 'from:paystack subject:payment')",
+                            "description": "Default 'all'. Use 'unread' only for 'check my emails' / 'any new emails'. For specific emails use Gmail query: 'from:devpost', 'subject:payment', 'from:stripe'. NEVER use 'unread' when the user asks about a specific sender or subject.",
                         },
                         "limit": {"type": "integer", "description": "Max emails to return (default 10)"},
                         "include_body": {"type": "boolean", "description": "Include full email body (default false)"},
@@ -536,7 +537,7 @@ TOOL_SCHEMAS = {
             "type": "function",
             "function": {
                 "name": "send_email",
-                "description": "Send an email via Gmail. IMPORTANT: Set confirm=True only after Travis has reviewed the content. Always draft first unless told otherwise.",
+                "description": "Send an email via Gmail. IMPORTANT: Set confirm=True only after the user has reviewed the content. Always draft first unless told otherwise.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -576,7 +577,7 @@ TOOL_SCHEMAS = {
             "type": "function",
             "function": {
                 "name": "send_draft",
-                "description": "Send an existing Gmail draft by its draft ID. REQUIRES confirm=True. Use this when Travis says 'send the draft' or 'send draft ID: X'.",
+                "description": "Send an existing Gmail draft by its draft ID. REQUIRES confirm=True. Use this when the user says 'send the draft' or 'send draft ID: X'.",
                 "parameters": {
                     "type": "object",
                     "properties": {

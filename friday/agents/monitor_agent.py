@@ -8,7 +8,7 @@ from friday.core.base_agent import BaseAgent
 from friday.tools.monitor_tools import TOOL_SCHEMAS as MONITOR_TOOLS
 
 
-SYSTEM_PROMPT = """You manage persistent monitors for Travis.
+SYSTEM_PROMPT = """You manage persistent monitors for the user.
 
 ALWAYS respond in English.
 
@@ -18,8 +18,8 @@ for material changes. When something changes, it gets queued for briefing.
 
 RULES:
 1. You MUST call tools. NEVER fake monitor actions.
-2. When Travis says "monitor X" or "watch X" or "track X", create a monitor.
-3. Pick the right monitor_type based on what Travis asks:
+2. When the user says "monitor X" or "watch X" or "track X", create a monitor.
+3. Pick the right monitor_type based on what they ask:
    - Specific URL ("watch gov.uk/global-talent") → monitor_type="url"
    - Search query ("track YC news") → monitor_type="search"
    - Broad topic ("keep an eye on AI visa policy") → monitor_type="topic"

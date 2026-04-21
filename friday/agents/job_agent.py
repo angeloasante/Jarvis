@@ -6,16 +6,15 @@ Can scan emails for job openings and act on them.
 """
 
 from friday.core.base_agent import BaseAgent
+from friday.core.user_config import USER
 from friday.tools.cv_tools import TOOL_SCHEMAS as CV_TOOLS
 from friday.tools.web_tools import TOOL_SCHEMAS as WEB_TOOLS
 from friday.tools.browser_tools import TOOL_SCHEMAS as BROWSER_TOOLS
 from friday.tools.email_tools import TOOL_SCHEMAS as EMAIL_TOOLS
 
 
-SYSTEM_PROMPT = """Job agent for Angelo Asante (19, AI engineer, Plymouth UK).
-Email: angeloasante958@gmail.com | Phone: +447555834656 | GitHub: github.com/angeloasante
-LinkedIn: linkedin.com/in/angeloasante | Portfolio: diasporaai.com | Location: Plymouth, UK
-Right to work: Yes (UK Student Dependent Visa) | Experience: 2 years | Education: WAEC, Prempeh College
+_BASE_PROMPT = """Job agent.
+{applicant_block}
 
 PHASE 1 — FIND THE JOB:
 If you already have a direct job URL, skip to Phase 2.
@@ -54,19 +53,15 @@ If a site needs login, call browser_wait_for_login().
 If a site redirects to Greenhouse/Lever/Workday, follow the redirect and fill that form.
 
 DEFAULT ANSWERS:
-- Location/Country: United Kingdom
-- City: Plymouth
-- Work authorization: Yes
-- Visa sponsorship: No
+- Use location/GitHub/website/LinkedIn from the applicant block above.
+- Work authorization: Yes (unless specified otherwise in the applicant block)
+- Visa sponsorship: No (unless specified otherwise)
 - How did you hear: Company website
 - Relocate: Yes
-- LinkedIn: https://linkedin.com/in/angeloasante
-- GitHub: https://github.com/angeloasante
-- Website: https://diasporaai.com
-- Experience: 2 years
 - Salary: Prefer not to say
 - Start date: Immediately
 - Gender/Race/Veteran: Decline to self-identify
+- If a required answer is NOT covered by the applicant block, ASK the user — don't invent.
 
 RULES:
 - browser_fill_form for ALL fields in ONE call. Never fill individually.
@@ -75,7 +70,38 @@ RULES:
 - NEVER report done if unfilled_required_count > 0. Keep filling.
 - ALWAYS tailor the CV to the job description. Never use a generic CV.
 - Chain calls fast. Don't explain between steps.
-- Only ask Travis before final submit."""
+- Only ask the user before final submit."""
+
+
+def _applicant_block() -> str:
+    """Render applicant identity from USER config."""
+    if not USER.is_configured:
+        return ("Applicant details are NOT configured. Before tailoring a CV or "
+                "filling forms, ASK the user for their name, email, phone, "
+                "location, GitHub, LinkedIn, and right-to-work status.")
+    parts = []
+    if USER.name:
+        parts.append(f"Name: {USER.name}")
+    if USER.email:
+        parts.append(f"Email: {USER.email}")
+    if USER.phone:
+        parts.append(f"Phone: {USER.phone}")
+    if USER.location:
+        parts.append(f"Location: {USER.location}")
+    if USER.github:
+        parts.append(f"GitHub: https://github.com/{USER.github}")
+    if USER.website:
+        parts.append(f"Portfolio: {USER.website}")
+    if USER.bio:
+        parts.append(f"Bio: {USER.bio}")
+    return "Applicant: " + " | ".join(parts) if parts else "Applicant details incomplete — ask the user for more."
+
+
+def get_system_prompt() -> str:
+    return _BASE_PROMPT.replace("{applicant_block}", _applicant_block())
+
+
+SYSTEM_PROMPT = get_system_prompt()
 
 
 class JobAgent(BaseAgent):
@@ -84,6 +110,7 @@ class JobAgent(BaseAgent):
     max_iterations = 30
 
     def __init__(self):
+        self.system_prompt = get_system_prompt()
         self.tools = {
             # CV tools
             **CV_TOOLS,

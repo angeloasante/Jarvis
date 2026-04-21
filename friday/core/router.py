@@ -18,29 +18,117 @@ logger = logging.getLogger(__name__)
 
 # ── Slim classification prompt — no personality, just routing ────────────────
 
-_CLASSIFY_PROMPT = """You are a router. Classify the user's intent into one agent.
+_CLASSIFY_PROMPT = """You are the router for FRIDAY, a personal AI OS. You pick which agent HANDLES the user's request.
 
-Agents:
-- code_agent: Code, files, git, terminal, debugging, scripts, deploy
-- research_agent: Web search, factual questions about the WORLD (not about the user's device), topic lookup, "who is [person]", "what is [concept]"
-- memory_agent: ONLY for explicit memory requests — "remember this", "what did I say about", "recall X". NOT for action commands
-- comms_agent: Email, calendar, schedule, meeting, draft, inbox, iMessage, text message, FaceTime call, contacts, WhatsApp messages
-- system_agent: Battery, system info, storage, RAM, CPU, open app, screenshot, dark mode, volume, brightness, running processes, PDF, screen vision, OCR, "what's on my screen", "can you see what I'm doing", "fill the form", "fill in the form", "complete this form"
-- household_agent: TV control — volume, mute, power on/off, launch apps (Netflix, YouTube, Spotify, Disney+), pause/play, screen off, smart home. ANY request involving the TV
-- monitor_agent: Track URL changes, watch for updates, alerts
-- briefing_agent: "Catch me up", morning brief, "any updates", "did anyone call"
-- cron_agent: Schedule/cron tasks — "every weekday at 8am", "set up a recurring task", "list my crons", "delete cron"
-- job_agent: CV, resume, cover letter, job application, tailor CV, "look at this job posting", "apply for this", "find jobs I qualify for", "read the job on my screen and apply"
-- social_agent: X/Twitter — tweet, post, mentions, search X, @username, trending
-- deep_research_agent: Deep research, research paper, detailed report, comprehensive analysis, "write a paper on", "deep dive into", "research and save"
-- CHAT: Casual conversation, greetings, opinions, banter, meta-questions about yourself ("what are you doing", "how are you", "who are you")
+CORE PRINCIPLE: FRIDAY agents are not assistants that explain. They EXECUTE. They DO the thing. Choose the agent that can ACTUALLY PERFORM the action. Never route to CHAT when an agent exists that can do the task.
 
-IMPORTANT: Questions about the user's DEVICE (battery, storage, CPU, RAM) → system_agent, NOT research_agent.
-IMPORTANT: Questions about YOU or casual chat ("what are you doing", "what's up") → CHAT, NOT research_agent.
-IMPORTANT: Anything about TV volume, TV control, turning TV on/off, launching apps on TV → household_agent, NOT memory_agent.
-IMPORTANT: Short confirmations like "yes", "go ahead", "do it", "proceed" — look at the conversation context. If the previous exchange was an agent asking for confirmation to continue a task, route to THAT SAME agent. Don't treat confirmations as casual chat.
+──────────────────────────────────────────────────
+AGENTS (what each one CAN DO):
+──────────────────────────────────────────────────
 
-Respond with ONLY the agent name or "CHAT". Nothing else.
+job_agent — AUTONOMOUSLY APPLIES TO JOBS
+  Can: browse job sites (LinkedIn, Greenhouse, Lever, Ashby, careers pages), read job descriptions, tailor the user's CV to a specific role, generate tailored PDF cover letter, fill application forms in Safari (text fields, dropdowns, file uploads, React-Select), submit (with confirmation).
+  Use for:
+    • "apply for [role] at [company]"
+    • "go to [company]'s site and apply for me"
+    • "find me jobs at Google"
+    • "tailor my CV for this role"
+    • "look at this job posting and apply"
+    • "read the job on my screen and make a CV"
+    • anything involving submitting a job application end-to-end
+  NOT for: general research about a company (that's research_agent).
+
+system_agent — CONTROLS THE MAC
+  Can: open/close apps, take screenshots, read what's on the screen (OCR + vision), solve questions on any visible page, control volume/brightness/dark mode, run terminal commands, read files, browse the web via Safari (navigate, click, fill forms, read pages), manipulate PDFs.
+  Use for:
+    • "open [app]" / "open [website]" / "go to [site]"
+    • "screenshot" / "what's on my screen"
+    • "fill the form on my screen"
+    • "what's my battery / CPU / RAM / storage"
+    • "turn on dark mode" / "set volume to 30"
+    • "navigate to [URL]"
+    • "read this PDF" / "solve the questions on this page"
+  NOT for: things about the TV (that's household_agent).
+
+household_agent — CONTROLS THE TV AND SMART HOME
+  Can: turn LG TV on/off, change volume, mute, launch apps on TV (Netflix, YouTube, Spotify, Disney+, Prime), pause/play, change channel, screen off, smart home devices.
+  Use for ANY request involving the TV, telly, television, lounge/living room screen.
+
+comms_agent — HANDLES ALL COMMUNICATION
+  Can: read/search/send Gmail, read/create calendar events, read/send iMessages, start FaceTime calls, search contacts, read/send WhatsApp (via local bridge), send/read SMS (via Twilio), draft/edit/send email drafts.
+  Use for:
+    • email ("check my emails", "draft an email", "send it")
+    • calendar ("what's on my calendar", "book a meeting")
+    • messages ("text Mom", "reply to <contact nickname>", "check my whatsapp")
+    • FaceTime ("call Dad", "facetime my brother")
+    • SMS ("sms me", "text my twilio number")
+
+social_agent — X / TWITTER
+  Can: post tweets, reply, quote-tweet, like, retweet, search X, read mentions, look up @users.
+  Use for ANY mention of X, Twitter, tweeting, posting, or @usernames.
+
+briefing_agent — DAILY DIGESTS
+  Can: synthesize emails + calendar + missed calls + X feed + monitor alerts into a briefing.
+  Use for: "catch me up", "brief me", "morning summary", "what did I miss", "any updates".
+
+memory_agent — PERSONAL MEMORY
+  Can: store facts about the user/their projects/their people, recall stored memories, search memory.
+  Use for: "remember that X", "what do I know about X", "recall my preferences".
+  NOT for: save-to-file (code_agent), not for notes to send someone (comms_agent).
+
+monitor_agent — AUTONOMOUS WATCHERS
+  Can: watch URLs for changes, track recurring web searches, monitor topics, alert on updates.
+  Use for: "monitor this page", "watch for changes", "alert me when X updates", "track [thing]".
+  NOT for: one-time lookups (research_agent).
+
+research_agent — WEB RESEARCH + SHORT WRITE-UPS
+  Can: search the web, fetch and read web pages, summarize, answer factual questions, AND save a short report to a file (md/docx/pdf/txt) when asked.
+  Use for:
+    • "who is [person]" / "what is [thing]"
+    • "fetch this URL and tell me about it"
+    • "tell me about [topic]"
+    • "write a SHORT / QUICK / BRIEF report/summary/overview on [topic]" (even with "save to desktop")
+    • background info on a company (NOT applying — that's job_agent)
+  This is the FAST path (~10-20s). Prefer this over deep_research_agent unless user asks for depth.
+
+code_agent — FILES AND CODE
+  Can: read/write files, run terminal commands, git operations, build/test code, save generated content to disk.
+  Use for: "write a script", "create a file at [path]", "fix this bug", "save [X] to my desktop", anything involving a file path or code.
+
+deep_research_agent — LONG-FORM / MULTI-SECTION DOCUMENTS
+  Can: multi-agent parallel research + synthesis into full 4-8 section documents (docx/pdf/md). Takes 2-3 minutes.
+  Use ONLY when user explicitly asks for depth:
+    • "write a PAPER on X"
+    • "COMPREHENSIVE / DETAILED / IN-DEPTH / THOROUGH report about Y"
+    • "DEEP DIVE into Z"
+    • "multi-section document"
+    • school/uni submissions, theses
+  Do NOT use for "short report", "quick summary", "brief overview" — that's research_agent.
+
+cron_agent — SCHEDULED TASKS
+  Can: create/list/delete recurring cron jobs.
+  Use for: "every weekday at 8am do X", "schedule X daily", "list my crons".
+
+CHAT — CASUAL CONVERSATION ONLY
+  Use for: greetings, opinions, "how are you", follow-ups asking about YOUR OWN previous response ("why did you say that", "what do you mean", "explain"), emotional conversation, no actionable task.
+
+──────────────────────────────────────────────────
+HARD RULES (these override everything above):
+──────────────────────────────────────────────────
+
+1. If the user wants to DO something (apply, open, send, fill, control, execute) — NEVER pick CHAT. Find the right action agent.
+2. "Apply for a job" / "go to [site] and apply" → job_agent. NEVER research_agent. NEVER CHAT.
+3. "Open [website/app]" / "go to [URL]" → system_agent. NEVER research_agent.
+4. Anything about TV / telly → household_agent. Always.
+5. X / Twitter / tweet / @username → social_agent. Always.
+6. Device stats (battery/RAM/CPU/storage) → system_agent, NEVER research_agent.
+7. "short report / quick summary / brief overview" → research_agent (fast, saves files too). Only "detailed / comprehensive / in-depth / multi-section / paper" → deep_research_agent.
+8. Follow-ups about YOUR last response ("why did you say that", "what do you mean") → CHAT.
+9. Short confirmations ("yes", "do it", "go ahead"): if the previous message was an agent asking "should I continue?", route to THAT SAME agent. Otherwise CHAT.
+10. When uncertain between CHAT and an action agent → pick the action agent. The user asks FRIDAY to DO things.
+
+Respond with ONLY the agent name (lowercase, with _agent suffix) or "CHAT". Nothing else. No explanation.
+
 Current time: {time}"""
 
 
@@ -226,16 +314,30 @@ def match_agent(
     if any(re.search(p, s) for p in household_patterns):
         return ("household_agent", raw)
 
+    # Household follow-up — if last agent was household, "search for X on youtube"
+    # means search on the TV's YouTube app, not web search
+    if recent_agent == "household_agent":
+        household_followup = [
+            r"\b(search|look|find)\s+(for\s+)?.*\bon\s+(youtube|netflix|disney|spotify)\b",
+            r"\b(open|play|go to)\s+(his |her |their |the |that |this )",
+            r"\b(search|look) for\b",
+            r"\b(next|previous|back|forward|select|pick|choose)\b",
+        ]
+        if any(re.search(p, s) for p in household_followup):
+            return ("household_agent", raw)
+
     # ── Monitor ──
     monitor_patterns = [
-        r"\b(monitor|watch|track|keep an eye on|alert me)\b",
+        r"\b(monitor|watch for|watch this .*(page|url|site|link)|track changes|keep an eye on|alert me when)\b",
         r"\b(my |the |show |list )?(monitors|watchers)\b",
         r"\b(pause|delete|stop|remove)\s+(the )?(monitor|watcher)\b",
         r"\b(force |)check\s+(the )?(monitor|watcher)\b",
         r"\bwhat('?s| is| am i) (being )?(monitored|watched|tracked|monitoring|watching|tracking)\b",
         r"\bmonitor\s+history\b",
     ]
-    if any(re.search(p, s) for p in monitor_patterns):
+    # Strip URLs before matching monitor patterns — "youtube.com/watch" shouldn't trigger monitor
+    s_no_urls = re.sub(r'https?://\S+', '', s).strip()
+    if any(re.search(p, s_no_urls) for p in monitor_patterns):
         return ("monitor_agent", raw)
 
     # ── Job / CV ──
@@ -367,17 +469,8 @@ def match_agent(
     if any(re.search(p, s) for p in system_patterns):
         return ("system_agent", raw)
 
-    # ── Memory ──
-    memory_patterns = [
-        r"\b(remember|recall|save|store)\s+(that |this |what )?\S",
-        r"\b(do you |you )(remember|know|recall)\b",
-    ]
-    if any(re.search(p, s) for p in memory_patterns):
-        return ("memory_agent", raw)
-
     # ── Code ──
     code_patterns = [
-        r"\b(write|build|create|implement|make)\s+(a |the |me )?(script|function|class|api|server|app|bot|tool|endpoint)\b",
         r"\b(debug|fix)\s+(the |this |my |a )?(bug|error|issue|code|script|crash)\b",
         r"\bgit\s+\S",
         r"\b(run|execute)\s+(the |this |my |a )?(script|code|command|server|test|file)\b",
@@ -386,6 +479,14 @@ def match_agent(
     ]
     if any(re.search(p, s) for p in code_patterns):
         return ("code_agent", raw)
+
+    # ── Memory ──
+    memory_patterns = [
+        r"\b(remember|recall)\s+(that |this |what )",
+        r"\b(do you |you )(remember|know|recall)\b",
+    ]
+    if any(re.search(p, s) for p in memory_patterns):
+        return ("memory_agent", raw)
 
     return None
 
@@ -406,6 +507,8 @@ def recent_agent_context(conversation: list[dict], memory=None) -> str | None:
     comms_kw = {"email", "gmail", "inbox", "calendar", "draft", "send email", "imessage", "text", "facetime", "message", "whatsapp"}
     system_kw = {"fill form", "fill the form", "browser_fill_form", "browser_discover_form",
                  "screenshot", "dark mode", "system info", "open app", "run command"}
+    household_kw = {"tv", "television", "telly", "netflix", "youtube", "spotify", "disney",
+                    "volume", "mute", "hdmi", "remote", "pause", "play on tv"}
 
     for msg in reversed(conversation[-6:]):
         content = msg.get("content", "").lower()
@@ -413,6 +516,8 @@ def recent_agent_context(conversation: list[dict], memory=None) -> str | None:
             return "social_agent"
         if any(kw in content for kw in comms_kw):
             return "comms_agent"
+        if any(kw in content for kw in household_kw):
+            return "household_agent"
         if any(kw in content for kw in system_kw):
             return "system_agent"
 
@@ -429,9 +534,18 @@ def extract_topic_from_conversation(conversation: list[dict]) -> str | None:
     )
 
     proper_nouns = re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b", recent_text)
-    SKIP = {"The", "This", "That", "What", "How", "Travis", "Friday", "FRIDAY",
-            "Just", "Yeah", "Nah", "Oya", "Chale", "Abeg", "Hawfar", "Plymouth",
-            "Ghana", "Ghanaian", "Are", "But", "Not", "You", "They"}
+    SKIP = {"The", "This", "That", "What", "How", "Friday", "FRIDAY",
+            "Just", "Yeah", "Nah", "Are", "But", "Not", "You", "They"}
+    # Also skip the user's own name (if configured) — it's noise for topic extraction.
+    try:
+        from friday.core.user_config import USER
+        if USER.name:
+            SKIP.add(USER.name)
+            for part in USER.name.split():
+                if len(part) > 2:
+                    SKIP.add(part)
+    except Exception:
+        pass
     proper_nouns = [n for n in proper_nouns if n not in SKIP and len(n) > 2]
 
     if proper_nouns:

@@ -8,7 +8,8 @@ import re
 import json as _json
 
 from friday.core.llm import cloud_chat, extract_stream_content
-from friday.core.prompts import PERSONALITY_SLIM
+from friday.core.prompts import get_personality_slim
+from friday.core.user_config import USER
 from friday.core.router import extract_topic_from_conversation
 from friday.memory.conversation_log import log_turn
 
@@ -23,6 +24,7 @@ async def try_oneshot(
     _ack,
     _status,
     _chunk,
+    _media=None,
 ) -> bool:
     """Try to handle query with direct tool call + 1 LLM format.
 
@@ -65,7 +67,7 @@ async def try_oneshot(
                 raw, result.data, "social_agent",
                 conversation, memory, session_id, mem_processor,
                 _status, _chunk,
-                fmt_hint="Summarize who mentioned Travis, what they said, highlight anything worth replying to.",
+                fmt_hint="Summarize who mentioned the user, what they said, highlight anything worth replying to.",
             )
 
     # ── X/Twitter user lookup ──
@@ -103,7 +105,7 @@ async def try_oneshot(
             _status("search emails")
             from friday.tools.email_tools import read_emails
             result = await read_emails(filter=search_term, limit=5, include_body=True)
-            fmt_hint = f"Summarize these emails about '{search_term}'. Include key details from the email bodies — dates, order info, shipping status, announcements. Answer what Travis is actually asking about."
+            fmt_hint = f"Summarize these emails about '{search_term}'. Include key details from the email bodies — dates, order info, shipping status, announcements. Answer what the user is actually asking about."
         else:
             _ack("checking email")
             _status("fetching emails")
@@ -140,25 +142,37 @@ async def try_oneshot(
             err = result.error.message if result.error else "Couldn't fetch calendar."
             return _oneshot_instant(raw, err, "comms_agent", conversation, memory, session_id, _chunk)
 
+    # Chained tasks must bypass the instant shortcuts below — they only do one
+    # thing. If the user says "take a screenshot AND describe it" or "open X AND
+    # paste Y", let the agent handle the chain.
+    _is_chained = bool(re.search(r"\b(and|then|also|plus|after that|next)\b", s))
+
     # ── Screenshot ── (instant — no LLM needed)
-    if re.match(r"(take |grab |capture )?(a )?(screenshot|screen ?shot|screencap|screen ?grab|screeny|ss)\b", s):
+    if not _is_chained and (
+        re.search(r"\b(take|grab|capture|snap)\s+(a\s+|another\s+)?(screenshot|screen ?shot|screencap|screen ?grab|screeny)\b", s)
+        or re.match(r"^(screenshot|screen ?shot|screencap|ss)\b", s)
+    ):
         _ack("taking screenshot")
         from friday.tools.mac_tools import take_screenshot
         result = await take_screenshot()
         if result.success:
             path = result.data.get("saved_path", "") if isinstance(result.data, dict) else ""
-            return _oneshot_instant(raw, f"Screenshot saved. {path}", "system_agent", conversation, memory, session_id, _chunk)
+            # Emit the path to the UI as structured media (renders as preview)
+            if _media and path:
+                _media(path)
+            return _oneshot_instant(raw, "Screenshot saved.", "system_agent", conversation, memory, session_id, _chunk)
 
     # ── Open app ── (instant — no LLM needed)
-    app_match = re.match(r"open\s+(.+)", s)
-    if app_match:
-        app_name = app_match.group(1).strip().rstrip("?.")
-        if app_name and len(app_name) < 30:
-            _ack(f"opening {app_name}")
-            from friday.tools.mac_tools import open_application
-            result = await open_application(app=app_name)
-            if result.success:
-                return _oneshot_instant(raw, f"{app_name.title()} is open.", "system_agent", conversation, memory, session_id, _chunk)
+    if not _is_chained:
+        app_match = re.match(r"open\s+(.+)", s)
+        if app_match:
+            app_name = app_match.group(1).strip().rstrip("?.")
+            if app_name and len(app_name) < 30:
+                _ack(f"opening {app_name}")
+                from friday.tools.mac_tools import open_application
+                result = await open_application(app=app_name)
+                if result.success:
+                    return _oneshot_instant(raw, f"{app_name.title()} is open.", "system_agent", conversation, memory, session_id, _chunk)
 
     # ── System info / battery ── (instant — format data directly, no LLM)
     if re.match(r"(whats|what'?s|what is|what was|show|get|check|tell me) ?(my )?(battery|system|storage|disk|ram|cpu|memory|uptime)", s) or \
@@ -196,13 +210,14 @@ async def try_oneshot(
         if result.success:
             return _oneshot_instant(raw, f"Volume set to {level}.", "system_agent", conversation, memory, session_id, _chunk)
 
-    # ── Web search (factual queries) ──
+    # ── Explicit web search (only when the user clearly asks to search) ──
+    # Removed the broad "what is / whats / whos / hows" patterns — they were
+    # catching personal questions like "what's on my screen", "what's my wifi"
+    # and forcing them into a web search when the user meant their own state.
+    # Those now fall through to the router/LLM which picks the right local tool.
     web_match = re.match(
-        r"(?:what is|what are|what'?s|who is|who are|who'?s|where is|when is|when did|how does|how do|how did)"
-        r"\s+(.+)", s
+        r"(?:search|look up|google|search for|look for|search the web for)\s+(.+)", s
     )
-    if not web_match:
-        web_match = re.match(r"(?:search|look up|google|search for|look for|search the web for)\s+(.+)", s)
 
     if web_match:
         query = web_match.group(1).strip().rstrip("?.")
@@ -222,7 +237,7 @@ async def try_oneshot(
                     raw, result.data, "research_agent",
                     conversation, memory, session_id, mem_processor,
                     _status, _chunk,
-                    fmt_hint="Answer Travis's question using these search results. Be thorough — include key facts, numbers, and details. Don't cut short.",
+                    fmt_hint="Answer the user's question using these search results. Be thorough — include key facts, numbers, and details. Don't cut short.",
                 )
             else:
                 err = result.error.message if result.error else "Search failed."
@@ -276,17 +291,18 @@ async def _oneshot_format(
     # Include recent conversation for context
     conv_context = ""
     if conversation:
-        recent = conversation[-4:]
+        recent = conversation[-10:]
         conv_lines = []
+        user_role = USER.display_name
         for msg in recent:
-            role = "Travis" if msg["role"] == "user" else "FRIDAY"
+            role = user_role if msg["role"] == "user" else "FRIDAY"
             conv_lines.append(f"{role}: {msg['content'][:200]}")
         conv_context = "\n\nRecent conversation:\n" + "\n".join(conv_lines)
 
     messages = [
-        {"role": "system", "content": f"{PERSONALITY_SLIM}\n\n{fmt_hint}"},
+        {"role": "system", "content": f"{get_personality_slim()}\n\n{fmt_hint}"},
         {"role": "user", "content": user_input},
-        {"role": "system", "content": f"Tool results:\n{data_str}{conv_context}\n\nRespond based on these results. Stay on topic — answer what Travis actually asked. Be direct and conversational."},
+        {"role": "system", "content": f"Tool results:\n{data_str}{conv_context}\n\nRespond based on these results. Stay on topic — answer what the user actually asked. Be direct and conversational."},
     ]
 
     response_stream = cloud_chat(messages=messages, stream=True, max_tokens=400)

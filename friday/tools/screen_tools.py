@@ -1,6 +1,6 @@
 """Screen Tools — screenshot capture, OCR (Apple Vision), vision model queries.
 
-On-command only. FRIDAY never watches the screen unless Travis explicitly asks.
+On-command only. FRIDAY never watches the screen unless the user explicitly asks.
 Uses macOS Vision framework for OCR (free, fast, offline) and Qwen2.5-VL via
 Ollama for image understanding (what's on screen, explain UI, read errors).
 """
@@ -329,14 +329,14 @@ async def ask_about_screen(
 
             messages = [
                 {"role": "system", "content": (
-                    "You are FRIDAY. Travis asked you to look at his screen. "
+                    "You are FRIDAY. The user asked you to look at their screen. "
                     "Below is all the text extracted from the screenshot via OCR. "
-                    "Answer his question based on what you can see in the text. "
+                    "Answer their question based on what you can see in the text. "
                     "Be direct and specific."
                 )},
                 {"role": "user", "content": (
                     f"Screen text:\n---\n{screen_text[:4000]}\n---\n\n"
-                    f"Travis's question: {prompt}"
+                    f"The user's question: {prompt}"
                 )},
             ]
 
@@ -1070,7 +1070,16 @@ TOOL_SCHEMAS = {
         "fn": ask_about_screen,
         "schema": {
             "name": "ask_about_screen",
-            "description": "Look at the screen and answer a question about it. Uses vision model (Qwen2.5-VL) for full image understanding — reads code, identifies apps, explains UI, diagnoses errors. Falls back to OCR + text LLM if vision model unavailable.",
+            "description": (
+                "SCREENSHOT + DESCRIBE in a single call — captures the screen "
+                "internally, then uses a vision model to answer the question. "
+                "PICK THIS (not take_screenshot) whenever the user wants to know "
+                "WHAT's on screen: 'what's on my screen', 'describe what you see', "
+                "'take a screenshot and tell me what apps are open', 'what am I "
+                "looking at', 'what's this error'. Handles code reading, app "
+                "identification, UI explanation, error diagnosis. Do NOT call "
+                "take_screenshot first — this does it internally."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

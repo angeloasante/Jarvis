@@ -1,7 +1,7 @@
 """Watch Tools — create, list, cancel standing orders.
 
-Standing orders are dynamic watch tasks Travis gives conversationally:
-"watch Ellen's messages for the next hour, reply as FRIDAY if she texts"
+Standing orders are dynamic watch tasks the user gives conversationally:
+"watch my partner's messages for the next hour, reply as FRIDAY if she texts"
 "monitor my emails for the next 2 hours, ping me if anything from Stripe comes in"
 """
 
@@ -45,13 +45,13 @@ TOOL_SCHEMAS = {
         "fn": create_watch,
         "schema": {
             "name": "create_watch",
-            "description": "Create a RECURRING standing order — a background task that runs on a loop for a set duration. ONLY use this when Travis says 'watch', 'monitor', 'keep an eye on', 'for the next X hours/minutes'. Do NOT use for one-time reads like 'check messages' or 'read messages' — use read_imessages/read_whatsapp for those instead. Supports: iMessage (watch someone's messages, reply), WhatsApp (watch WhatsApp messages, reply), email (watch for emails from a sender, notify), missed calls (notify on new missed calls), browser/LinkedIn (check notifications). The instruction should contain the FULL context of what to check and what to do. For WhatsApp watches, include 'whatsapp' in the instruction.",
+            "description": "Create a RECURRING standing order — a background task that runs on a loop. ONLY use this when the user says 'watch', 'monitor', 'keep an eye on', 'track'. Do NOT use for one-time reads like 'check messages' or 'read messages'. Supports ALL watch types: iMessage (watch messages, reply), WhatsApp (watch messages, reply), email (watch for emails, notify), missed calls (notify), URL (watch a webpage for changes, diff and notify), search (recurring web search for news/updates), topic (broad topic awareness like 'AI news' or 'startup updates'), browser/LinkedIn (check notifications). The instruction should contain the FULL context of what to check and what to do. For URLs, include the full URL. For searches, describe what to search for.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "instruction": {
                         "type": "string",
-                        "description": "The full standing order in natural language. Examples: 'Check messages from Ellen, reply like me' (iMessage). 'Watch WhatsApp messages from Abby, reply like me' (WhatsApp). 'Watch my emails for anything from Stripe, notify me' (email). 'Check for missed calls, notify me' (calls). 'Open LinkedIn and check for new notifications' (browser).",
+                        "description": "The full standing order in natural language. Examples: 'Check messages from <contact>, reply like me' (iMessage). 'Watch WhatsApp messages from <contact>, reply like me' (WhatsApp). 'Watch my emails for anything from Stripe, notify me' (email). 'Check for missed calls, notify me' (calls). 'Watch https://news.ycombinator.com for new AI posts' (URL). 'Search for AI startup news daily' (search). 'Track the AI space for major announcements' (topic). 'Open LinkedIn and check for new notifications' (browser).",
                     },
                     "interval_seconds": {
                         "type": "integer",

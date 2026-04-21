@@ -1,7 +1,10 @@
 __pycache__/
 *.pyc
 .venv/
-data/
+# Top-level data/ holds runtime output (cv_output PDFs, logs). Ignored.
+# But friday/data/ holds package-data files (CV loader, bundled OAuth client)
+# that have to ship in the pip install — those are tracked.
+/data/
 *.egg-info/
 dist/
 build/

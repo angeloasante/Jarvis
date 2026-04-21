@@ -187,13 +187,15 @@ def cloud_chat(
         if stream:
             kwargs["stream"] = True
 
-        # Tell Qwen 3 not to use thinking mode
-        if "qwen" in (model or CLOUD_MODEL_NAME).lower():
-            # Prepend instruction to suppress thinking
+        # Model-specific thinking suppression
+        _model = (model or CLOUD_MODEL_NAME).lower()
+        if "qwen" in _model:
+            # Qwen 3 needs explicit /no_think token to suppress reasoning
             if kwargs["messages"] and kwargs["messages"][0]["role"] == "system":
                 kwargs["messages"][0]["content"] = "/no_think\n" + kwargs["messages"][0]["content"]
             else:
                 kwargs["messages"].insert(0, {"role": "system", "content": "/no_think"})
+        # Gemma 4 and most other models don't need thinking suppression
 
         response = client.chat.completions.create(**kwargs)
 

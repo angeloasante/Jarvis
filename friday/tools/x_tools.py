@@ -124,7 +124,7 @@ async def delete_tweet(tweet_id: str) -> ToolResult:
 
 
 async def get_my_mentions(max_results: int = 10) -> ToolResult:
-    """Get recent @mentions of Travis's account."""
+    """Get recent @mentions of the user's account."""
     config_err = _check_config()
     if config_err:
         return ToolResult(success=False, error=config_err)
@@ -352,7 +352,7 @@ TOOL_SCHEMAS = {
         "fn": post_tweet,
         "schema": {"type": "function", "function": {
             "name": "post_tweet",
-            "description": "Post a tweet as Travis. 280 chars max. Can reply or quote-tweet.",
+            "description": "Post a tweet on behalf of the user. 280 chars max. Can reply or quote-tweet.",
             "parameters": {"type": "object", "properties": {
                 "text": {"type": "string", "description": "Tweet text (max 280 chars)"},
                 "reply_to_id": {"type": "string", "description": "Tweet ID to reply to"},
@@ -364,7 +364,7 @@ TOOL_SCHEMAS = {
         "fn": delete_tweet,
         "schema": {"type": "function", "function": {
             "name": "delete_tweet",
-            "description": "Delete one of Travis's tweets by ID.",
+            "description": "Delete one of the user's tweets by ID.",
             "parameters": {"type": "object", "properties": {
                 "tweet_id": {"type": "string", "description": "Tweet ID to delete"},
             }, "required": ["tweet_id"]},
@@ -374,7 +374,7 @@ TOOL_SCHEMAS = {
         "fn": get_my_mentions,
         "schema": {"type": "function", "function": {
             "name": "get_my_mentions",
-            "description": "Get recent @mentions of Travis's X account.",
+            "description": "Get recent @mentions of the user's X account.",
             "parameters": {"type": "object", "properties": {
                 "max_results": {"type": "integer", "description": "Number of mentions (default 10)"},
             }, "required": []},

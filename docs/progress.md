@@ -1371,4 +1371,366 @@ See [docs/whatsapp-setup.md](whatsapp-setup.md) for background running, launchd 
 
 ---
 
-*Last updated: 2026-03-28*
+## Phase 4.7 — Gesture Control (COMPLETE)
+
+**Target**: Iron Man-style gesture control via MacBook FaceTime camera. Hold a hand gesture, FRIDAY reacts.
+
+### MediaPipe GestureRecognizer
+- [x] Integrated Google MediaPipe Tasks API (0.10+) with GestureRecognizer model
+- [x] 7 built-in gestures per hand: Closed_Fist, Open_Palm, Pointing_Up, Thumb_Up, Thumb_Down, Victory, ILoveYou
+- [x] Two-hand detection (`num_hands=2`) — each hand classified independently
+- [x] float16 model (8MB) stored at `~/.friday/models/gesture_recognizer.task`
+- [x] Runs at 30fps on CPU via TFLite XNNPACK — zero GPU required
+- [x] Works across skin tones, lighting conditions, hand sizes
+
+### GestureEngine (`friday/vision/gesture_engine.py`)
+- [x] `FrameResult` with `HandState` per hand — stores gesture, confidence, pinch state, landmarks
+- [x] `compound_name()` builds gesture names: `right_closed_fist`, `both_thumb_up`, `right_closed_fist_left_open_palm`
+- [x] **Wrist-based handedness** — uses wrist x-position (landmark 0) to determine left/right hand. MediaPipe's built-in handedness classifier is unreliable on mirrored cameras, so we use spatial position instead: hand on left side of frame = user's right hand (mirrored)
+- [x] **Side dedup** — if two hands detected but both assigned the same side, engine forces them apart
+- [x] Custom pinch detection from landmarks — thumb tip + index tip distance < threshold
+- [x] Pinch position tracking for drag gestures
+- [x] C++ log suppression at OS fd level (MediaPipe/TFLite/abseil noise silenced)
+- [x] Confidence threshold at 0.4 — balances sensitivity vs false positives
+
+### GestureListener (`friday/vision/gesture_listener.py`)
+- [x] Daemon thread architecture — identical pattern to VoicePipeline
+- [x] `GestureListener(friday, main_loop)` — stores FridayCore + asyncio event loop
+- [x] `start()` → daemon thread, `stop()` → flag + camera release
+- [x] Hold threshold (0.4s), cooldown (1.5s), grace window (0.3s) for flicker tolerance
+- [x] **Two-hand frame buffer** — 0.4s buffer keeps recent hand detections so both hands don't need to appear in the exact same frame for combos to fire. If right hand was seen 0.3s ago and left hand appears now, they merge into a combo
+- [x] **Pinch drag** — continuous control, tracks pinch position over time, fires on movement
+- [x] Drag cooldown (0.3s between fires) prevents spam while allowing smooth continuous control
+- [x] Camera warmup — drains black AVFoundation frames before detection starts
+- [x] `_fire_command()` bridges to FridayCore via `asyncio.run_coroutine_threadsafe()` — fast_path first, agent dispatch fallback
+- [x] Voice + gesture run simultaneously as independent threads
+
+### Gesture Commands (`friday/vision/gesture_commands.py`)
+- [x] **29 total gestures**: 8 right hand, 8 left hand, 7 both hands, 2 mixed combos, 4 pinch drag
+- [x] **100% configured from `.env`** — every gesture overridable via `GESTURE_<NAME>=command`
+- [x] Timing also from `.env`: `GESTURE_HOLD_SECONDS`, `GESTURE_COOLDOWN_SECONDS`, `GESTURE_PINCH_DRAG_THRESHOLD`
+- [x] Commands match existing fast_path regex patterns for sub-second execution
+- [x] Zero Python editing needed — clone, edit `.env`, go
+
+### CLI Integration
+- [x] `FRIDAY_GESTURES=true` env flag in `.env` (off by default)
+- [x] `/gestures` runtime toggle (on/off)
+- [x] Gesture status in CLI banner
+- [x] Gesture guide printed on startup (shows all gestures + commands)
+- [x] Clean shutdown on `/quit`
+
+### Files
+
+| File | Status |
+|------|--------|
+| `friday/vision/__init__.py` | **New** — Package init + log suppression |
+| `friday/vision/gesture_engine.py` | **New** — MediaPipe GestureRecognizer wrapper |
+| `friday/vision/gesture_commands.py` | **New** — Gesture → command map + timing |
+| `friday/vision/gesture_listener.py` | **New** — Daemon thread listener |
+| `docs/gesture-control.md` | **New** — Full feature documentation |
+| `pyproject.toml` | **Modified** — Added mediapipe, opencv-python deps |
+| `.env` | **Modified** — Added FRIDAY_GESTURES flag |
+| `friday/cli.py` | **Modified** — Startup, /gestures toggle, banner, quit |
+
+### Key Discoveries
+- MediaPipe 0.10+ dropped `mp.solutions.hands` — new Tasks API uses `GestureRecognizer` with bundled model files
+- `HandLandmarker` API had poor detection on MacBook camera — `GestureRecognizer` (which bundles its own palm detector) worked much better
+- AVFoundation returns black frames for the first ~1s after `VideoCapture(0)` — need warmup drain
+- MediaPipe C++ logs bypass Python logging — required OS-level fd redirect (`os.dup2`) to silence
+- Detection flickers at lower confidence (~0.5) — grace window of 0.3s prevents hold timer resets
+- **MediaPipe handedness classifier is unreliable on mirrored cameras** — frequently swaps left/right. Fix: use wrist x-position instead (landmark 0). Left side of mirrored frame = user's right hand
+- **Two-hand detection drops one hand intermittently** — both hands rarely appear in the exact same frame at low confidence. Fix: 0.4s frame buffer merges hands from consecutive frames for reliable combo detection
+- **`.env` polling for live toggle was unreliable** — `load_dotenv(override=True)` doesn't work predictably when the file is edited mid-process. Fix: use explicit `/gestures-on` and `/gestures-off` slash commands instead
+
+---
+
+## Universal Heartbeat (Session Update)
+
+**Merged monitor_scheduler into heartbeat.** One background system now handles everything:
+
+- [x] Added `url`, `search`, `topic` watch types to heartbeat classification
+- [x] `_execute_web_watch()` — URL page diffing, web search monitoring, topic tracking with content hashing + materiality detection
+- [x] Smart interval defaults: search/topic=15min, url=2h, email=5min, messages=1min
+- [x] Web target extraction from natural language instructions
+- [x] Keyword-based materiality filtering
+- [x] Dedup for web watches (not just contact-based)
+- [x] Migrated 2 existing monitors (YC companies, AI news) to watch_tasks
+- [x] Removed monitor_scheduler from CLI startup
+- [x] 9 total watch types: iMessage, WhatsApp, email, calls, url, search, topic, browser, notifications
+
+## Bug Fixes (Session Update)
+
+- [x] **WhatsApp SIGTERM crash** — `_kill_stale_bridge()` was killing the Python process via `lsof -ti :3100` (httpx keep-alive socket showed up as a PID on port 3100). Fixed: skip own PID.
+- [x] **WhatsApp "disconnected" treated as dead** — `_ensure_bridge()` would kill a healthy bridge that was just disconnected from WhatsApp servers. Fixed: accept "disconnected" as alive.
+- [x] **Groq rejecting `agent` field** — conversation messages had extra `agent` property, Groq API rejects unknown fields. Fixed: track last agent in `self._last_agent` instead of on message dict.
+- [x] **"yes" confirmation routing** — short confirmations after an agent follow-up question went to fast_chat instead of re-dispatching to the same agent. Fixed: added Priority 2.7 confirmation handler.
+- [x] **TV command misrouting** — "open his channel on my tv" routed to web search instead of household_agent because LLM classifier ran before regex. Fixed: swapped order — regex first, LLM fallback.
+- [x] **Household follow-up routing** — "search for X on youtube" after a TV command went to research instead of staying with household. Fixed: added household follow-up patterns in router.
+
+- [x] **URL routing to screen tools** — "fetch this URL" was routed to `ask_about_screen` by direct dispatch. Fixed: skip direct dispatch entirely when input contains a URL.
+- [x] **YouTube URL triggering monitor** — `youtube.com/watch?v=` matched the `\bwatch\b` monitor pattern. Fixed: strip URLs before matching monitor patterns.
+- [x] **Email unread-only default** — `read_emails` defaulted to `filter="unread"`, so "check the devpost mail" missed read emails. Fixed: default to `"all"`, schema tells LLM to use `from:X` for specific senders.
+- [x] **"that wasn't what I asked" hitting screen tools** — corrections/complaints routed to tool dispatch. Fixed: added complaint pattern detection to skip dispatch.
+- [x] **Conversation context window too small** — agents only saw 4-6 messages (2-3 turns), losing job discussion context. Fixed: bumped to 10-12 messages across all paths.
+- [x] **browser_navigate hanging on SPAs** — `wait_for="load"` never completes on JS-heavy sites. Fixed: default to `domcontentloaded` with 15s timeout, graceful fallback if even that fails.
+
+---
+
+## Phase 5 — Skills & Intelligence (COMPLETE)
+
+**Target**: Skill system that makes agents smarter about multi-step reasoning, learning from mistakes, and domain-specific patterns.
+
+### Skill System Architecture
+
+Adopted OpenClaw/ClawHub SKILL.md format — markdown files with YAML frontmatter that agents load into their system prompt before executing.
+
+- [x] **Skill loader** (`friday/skills/loader.py`) — discovers skills from `friday/skills/` (repo) + `~/.friday/skills/` (personal)
+- [x] YAML frontmatter parsing: name, description, agents (which agents load it)
+- [x] `agents: all` = every agent, `agents: [job_agent, research_agent]` = targeted
+- [x] Skills injected into BaseAgent system prompt via `build_skill_context()`
+- [x] `reload()` function for runtime skill refresh
+- [x] User-created skills in `~/.friday/skills/` override repo skills with same name
+
+### Skills Shipped (14 total)
+
+| Skill | Agents | Purpose |
+|-------|--------|---------|
+| `proactive-execution` | all | Never ask "should I proceed?" — chain steps, act don't ask |
+| `adaptive-reasoning` | all | Score complexity 0-10, match effort to difficulty |
+| `memory-first` | all | Check memory before web search, never say "I don't have info" without searching |
+| `self-improving` | all | Learn from corrections, store preferences, record patterns using existing store_memory/search_memory tools |
+| `web-research` | research, job, deep_research | Fetch URL flow with JS fallback, search-before-answering |
+| `job-analysis` | job, research | Fetch posting → check memory → score fit → rank projects → verdict. Read vs Apply distinction |
+| `youtube-watcher` | research, deep_research | Fetch transcripts via yt-dlp, summarize, answer questions |
+| `humanize-text` | comms, job, social | Strip AI patterns, match Travis's writing style, no "delve" or "I hope this finds you well" |
+| `browser-use` | system, job, research | Snapshot→act→verify pattern, form filling, session persistence |
+| `pdf-toolkit` | system, job, code | Extract text/tables, create, merge, split, rotate PDFs. pypdf, pdfplumber, WeasyPrint |
+| `image-tools` | system, code, social | Resize, compress, convert, crop images. Social media size presets. Pillow + ffmpeg |
+| `powerpoint` | system, job, code | Create/edit PPTX presentations, pitch deck structure template. python-pptx |
+| `code-workflow` | code | Structured plan→execute→verify→deliver. Anti-patterns, git conventions, language-specific rules |
+| `marketing-strategy` | research, deep_research | April Dunford positioning, ICP definition, competitive battlecards, tiered launch planning, pricing |
+
+### New Tools
+
+- [x] **`youtube_transcript`** (`friday/tools/web_tools.py`) — yt-dlp transcript extraction + metadata (title, channel, duration, views, full subtitle text)
+- [x] **`fetch_page` browser fallback** — auto-detects JS-only pages (React SPAs), falls back to Playwright browser rendering. Known SPA detection: "enable javascript", empty content, `__next_data__`
+
+### Memory Seeding
+
+Seeded FRIDAY's memory with real-world learnings from testing sessions:
+- [x] 7 corrections (routing mistakes, fetch patterns, project context)
+- [x] 5 patterns (job analysis flow, project search keywords, TV fast_path)
+- [x] 4 preferences (honest gaps, act don't ask, GitHub links, root cause fixes)
+- [x] All Travis's projects with GitHub URLs, tech stacks, descriptions from README
+
+### Key Discoveries
+- OpenClaw/ClawHub ecosystem has 5,198 vetted skills (MIT licensed). Format is simple SKILL.md — adopted same format for FRIDAY compatibility
+- Skills work best when they tell agents WHAT to do in specific scenarios, not abstract rules
+- `proactive-execution` skill dramatically reduced "should I proceed?" but agents still occasionally ask — hard to fully override LLM habits
+- Self-improving skill uses FRIDAY's existing `store_memory`/`search_memory` tools — no new infrastructure needed
+- YouTube transcripts via yt-dlp are high quality (auto-generated subs), 6000+ chars for 18min videos
+- The humanize-text skill needs reinforcement through corrections over time — LLMs default to formal writing
+
+### Files
+
+| File | Status |
+|------|--------|
+| `friday/skills/loader.py` | **New** — Skill discovery, frontmatter parsing, agent matching |
+| `friday/skills/proactive_execution/SKILL.md` | **New** |
+| `friday/skills/adaptive_reasoning/SKILL.md` | **New** |
+| `friday/skills/memory_first/SKILL.md` | **New** |
+| `friday/skills/self_improving/SKILL.md` | **New** |
+| `friday/skills/web_research/SKILL.md` | **New** |
+| `friday/skills/job_analysis/SKILL.md` | **New** |
+| `friday/skills/youtube_watcher/SKILL.md` | **New** |
+| `friday/skills/humanize_text/SKILL.md` | **New** |
+| `friday/skills/browser_use/SKILL.md` | **New** |
+| `friday/skills/pdf_toolkit/SKILL.md` | **New** |
+| `friday/skills/image_tools/SKILL.md` | **New** |
+| `friday/skills/powerpoint/SKILL.md` | **New** |
+| `friday/skills/code_workflow/SKILL.md` | **New** |
+| `friday/skills/marketing_strategy/SKILL.md` | **New** |
+| `friday/tools/web_tools.py` | **Modified** — Added `youtube_transcript`, `_fetch_with_browser` fallback |
+| `friday/core/base_agent.py` | **Modified** — Skills injected into system prompt |
+| `friday/core/tool_dispatch.py` | **Modified** — URL bypass, complaint detection |
+| `friday/core/orchestrator.py` | **Modified** — Conversation window bumped to 10-12 messages |
+| `friday/core/oneshot.py` | **Modified** — Conversation context bumped to 10 messages |
+| `friday/core/router.py` | **Modified** — URL stripping for monitor patterns, LLM prompt improvements |
+| `friday/tools/email_tools.py` | **Modified** — Default filter "all", schema guides LLM to use from:X |
+
+---
+
+### Skill Sources
+- 5 skills adapted from OpenClaw/ClawHub community (MIT licensed): adaptive-reasoning, self-improving, browser-use, humanize-text, youtube-watcher
+- 5 skills adapted from ClawHub patterns: pdf-toolkit, image-tools, powerpoint, code-workflow, marketing-strategy
+- 4 skills written from scratch for FRIDAY: proactive-execution, memory-first, web-research, job-analysis
+
+---
+
+## Phase 7 — SMS Integration & Remote Access (COMPLETE)
+
+**Target**: Text FRIDAY from anywhere. Twilio SMS webhook → FridayCore → reply. Tailscale Funnel for a permanent public URL.
+
+### SMS Webhook Server (`friday/sms/server.py`) — NEW FILE
+
+- [x] HTTP server on port 3200 (configurable via `SMS_PORT` env var)
+- [x] POST `/sms` — receives Twilio webhook payloads (form-encoded), extracts `From` and `Body`
+- [x] Security gate — only processes SMS from `SMS_ALLOWED_NUMBERS` or `CONTACT_PHONE`
+- [x] Processes through `FridayCore.process()` — full pipeline (routing → agents → tools → synthesis)
+- [x] Returns TwiML XML response — Twilio delivers FRIDAY's reply as SMS
+- [x] GET `/health` — health check endpoint
+- [x] Response truncation at 1500 chars (SMS concatenation limit)
+- [x] 45-second processing timeout (prevents Twilio webhook retries)
+- [x] Runs as daemon thread inside FRIDAY process — starts and stops with CLI
+- [x] Standalone mode — `python -m friday.sms.server` for testing without full CLI
+
+### SMS Tools (`friday/tools/sms_tools.py`) — NEW FILE
+
+- [x] `send_sms(to, message)` — outbound SMS via Twilio REST API
+- [x] `read_sms(limit)` — read recent inbound messages from Twilio logs
+- [x] Lazy Twilio client initialization — SDK loaded on first use
+- [x] `asyncio.to_thread()` for non-blocking API calls
+- [x] TOOL_SCHEMAS with function definitions for agent integration
+
+### Comms Agent Updates (`friday/agents/comms_agent.py`)
+
+- [x] SMS tools (`send_sms`, `read_sms`) loaded alongside email, iMessage, WhatsApp
+- [x] Optional import — graceful fallback if Twilio not configured
+- [x] Smart email search for purchase updates — shipping/tracking/delivery emails, NOT payment receipts
+
+### Tailscale Funnel (Remote Access)
+
+- [x] Permanent public URL: `https://traviss-macbook-air.tail452e49.ts.net/sms`
+- [x] Auto-start in CLI via `tailscale funnel --bg 3200`
+- [x] Checked Tailscale status before starting (skip if not installed)
+- [x] Console output: "Tailscale Funnel ACTIVE — SMS reachable from anywhere"
+- [x] No rate limits, no interstitial pages, valid TLS certificate
+- [x] Replaced ngrok — stable URL, free, no terminal window needed
+
+### CLI Integration (`friday/cli.py`)
+
+- [x] SMS server starts automatically on boot (if Twilio configured)
+- [x] Tailscale Funnel starts automatically on boot (if Tailscale installed)
+- [x] Both non-critical — FRIDAY works fine without them
+- [x] Clean shutdown — daemon threads die when FRIDAY exits
+
+### Twilio Configuration
+
+| Key | Value | Source |
+|-----|-------|--------|
+| `TWILIO_ACCOUNT_SID` | Account SID | `.env` |
+| `TWILIO_AUTH_TOKEN` | Auth token | `.env` |
+| `TWILIO_PHONE_NUMBER` | Default outbound number (+447367000489 UK) | `.env` |
+| `TWILIO_PHONE_NUMBER_US` | US number (+17405588099) | `.env` |
+| `SMS_PORT` | Webhook server port (default 3200) | `.env` |
+| `SMS_ALLOWED_NUMBERS` | Comma-separated allowed senders | `.env` |
+| `CONTACT_PHONE` | Fallback allowed number | `.env` |
+
+### Test Results
+
+| Test | Result |
+|------|--------|
+| Health check via Tailscale | `{"status":"ok","service":"friday-sms"}` |
+| Simulated Twilio webhook | FRIDAY processed "what time is it" → replied "It's 10:04 AM, Wednesday." |
+| Real SMS from phone | "Who this?" → "It's me, FRIDAY. Your machine's got me on watch." |
+| Email query via SMS | "Check my mail for brilliant labs glasses" → pulled Klarna payment confirmation |
+| Follow-up conversation | 5 messages exchanged successfully via real SMS |
+
+### Key Decisions
+
+- **Tailscale over ngrok** — free, no rate limits, stable URL, runs as system service, also provides private VPN for future remote access
+- **UK number as default** — Travis is UK-based, UK→UK SMS is cheaper and faster than US→UK
+- **Daemon thread** — SMS server runs inside FRIDAY process (not separate). One command starts everything, Ctrl+C kills everything.
+- **No Twilio request validation yet** — X-Twilio-Signature header not checked. Fine for personal use with allowed-numbers gate, but should be added before sharing the number publicly.
+
+### Files
+
+| File | Status |
+|------|--------|
+| `friday/sms/__init__.py` | **New** — Package init |
+| `friday/sms/server.py` | **New** — HTTP webhook server, TwiML responses |
+| `friday/tools/sms_tools.py` | **New** — `send_sms`, `read_sms` + schemas |
+| `friday/agents/comms_agent.py` | **Modified** — SMS tools loaded, purchase update search logic |
+| `friday/cli.py` | **Modified** — SMS server auto-start, Tailscale Funnel auto-start |
+| `.env` | **Modified** — Twilio credentials, UK/US numbers |
+| `docs/sms-setup.md` | **New** — Full setup guide with architecture, troubleshooting, costs |
+
+---
+
+## Phase 7.5 — Provider-Agnostic Cloud + Gemma 4 Switch (COMPLETE)
+
+**Target**: Replace Groq-locked Qwen3-32B with provider-agnostic cloud LLM. Benchmark and switch to best model.
+
+### Why
+
+Qwen3-32B on Groq was fast (0.5s avg) but had accuracy problems:
+- Leaked `<think>` reasoning blocks despite `/no_think` injection
+- Failed 6/12 tool dispatch tests (empty responses, schema errors)
+- 0/16 classify tests (thinking blocks instead of agent names)
+- Generated AI slop in chat ("Certainly!", "Go crush it!")
+
+### Benchmark: Gemma 4 31B vs Qwen3-32B
+
+Ran 36-query benchmark across FRIDAY's 3 actual LLM paths using real system prompts and tool schemas:
+
+| Path | Qwen3-32B (Groq) | Gemma 4 31B (OpenRouter) |
+|------|-------------------|--------------------------|
+| **Classify** (16 queries) | 0/16 (0%) | **16/16 (100%)** |
+| **Dispatch** (12 queries) | 6/12 (50%) | **11/12 (92%)** |
+| **Chat** (8 queries) | 2/8 (25%) | **8/8 (100%)** |
+| **TOTAL** | **8/36 (22%)** | **35/36 (97%)** |
+| **Avg speed** | **0.46s** | **2.95s** |
+
+Gemma 4 highlights:
+- Perfect intent classification — every query routed to the correct agent
+- 11/12 correct tool picks with proper arguments
+- Chat responses matched FRIDAY personality: "Hawfar, chale. What we building today?"
+- No thinking blocks, no slop, no schema errors
+- Only failure: 1 parsing error on NO_TOOL greeting detection
+
+Qwen3 failures:
+- Every classify response started with `<think>` blocks instead of the agent name
+- 4/12 dispatch queries returned empty (no tool call, no text)
+- 3/12 dispatch queries crashed with Groq schema validation errors
+- Chat responses 100-200 words for 1-2 sentence greetings, with slop phrases
+
+### Provider-Agnostic Architecture
+
+Made `cloud_chat()` work with any OpenAI-compatible provider:
+
+```
+cloud_chat()
+  ├─ OPENROUTER_API_KEY → OpenRouter (Gemma 4 31B, ~3s)
+  ├─ GROQ_API_KEY       → Groq (Qwen3-32B, ~0.5s)
+  ├─ CLOUD_API_KEY      → Any provider (Together, Fireworks, RunPod, etc.)
+  └─ None               → Local Ollama fallback (~15s)
+```
+
+Priority: explicit `CLOUD_*` > `OPENROUTER_API_KEY` > `GROQ_API_KEY` > Ollama.
+
+### Cost Comparison (at actual usage: ~200 LLM calls/day)
+
+| Provider | Model | Monthly Cost |
+|----------|-------|-------------|
+| **OpenRouter** | Gemma 4 31B | **$3.43** |
+| Together AI | Gemma 4 31B | $4.82 |
+| Groq | Qwen3-32B | $6.82 |
+| Fireworks | Gemma 4 31B | $20.05 |
+| Local Ollama | Qwen3.5-9B | Free |
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `friday/core/config.py` | Provider-agnostic detection: OPENROUTER > GROQ > CLOUD_API_KEY > Ollama |
+| `friday/core/llm.py` | Model-specific thinking suppression (Qwen only), kept provider-agnostic |
+| `.env` | OpenRouter as default, Groq as backup, manual override docs |
+| `tests/test_gemma_vs_qwen.py` | **New** — 12-query tool calling benchmark |
+| `tests/test_full_benchmark.py` | **New** — 36-query full architecture benchmark (3 paths) |
+| `README.md` | Updated Quick Start, Cloud Inference, Tech Stack, Config, Pricing |
+
+### Key Decision
+
+Switched default from Qwen3-32B/Groq to Gemma 4 31B/OpenRouter. Trade: 6x slower (2.95s vs 0.46s) for 4.4x more accurate (97% vs 22%). Speed still well within usable range — 3s feels responsive. When Gemma 4 lands on Groq, we get both.
+
+*Last updated: 2026-04-09*

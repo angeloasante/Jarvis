@@ -47,6 +47,18 @@ _TRIGGER_RE = re.compile(
 )
 
 
+def _voice_speaker_label() -> str:
+    """Label used for the human speaker in voice transcripts.
+
+    Pulls from ~/.friday/user.json; falls back to 'You'.
+    """
+    try:
+        from friday.core.user_config import USER
+        return USER.name.strip() or "You"
+    except Exception:
+        return "You"
+
+
 def _play_chime():
     """Play a short activation chime."""
     t = np.linspace(0, CHIME_DURATION, int(SAMPLE_RATE * CHIME_DURATION), False)
@@ -340,9 +352,11 @@ class VoicePipeline:
         # Strip trailing filler: "friday, you dig?" → "you dig?"
         query = after_trigger if after_trigger else before_trigger
 
+        speaker_label = _voice_speaker_label()
+
         if not query or len(query) < 2:
             _play_chime()
-            console.print(f"\n  [bold cyan]🎤 Travis:[/bold cyan] [cyan]{trigger_text}[/cyan]")
+            console.print(f"\n  [bold cyan]🎤 {speaker_label}:[/bold cyan] [cyan]{trigger_text}[/cyan]")
             self._tts.speak("Yeah?")
             self._last_response_time = time.time()
             return
@@ -350,7 +364,7 @@ class VoicePipeline:
         # Build ambient context from rolling transcript
         ambient_context = self._build_ambient_context()
 
-        console.print(f"\n  [bold cyan]🎤 Travis:[/bold cyan] [cyan]{trigger_text}[/cyan]")
+        console.print(f"\n  [bold cyan]🎤 {speaker_label}:[/bold cyan] [cyan]{trigger_text}[/cyan]")
         _play_chime()
 
         self._respond(query, ambient_context)
@@ -358,7 +372,7 @@ class VoicePipeline:
     def _on_followup(self, text: str):
         """Speech within follow-up window — treat as directed at FRIDAY."""
         ambient_context = self._build_ambient_context()
-        console.print(f"\n  [bold cyan]🎤 Travis:[/bold cyan] [cyan]{text}[/cyan]")
+        console.print(f"\n  [bold cyan]🎤 {_voice_speaker_label()}:[/bold cyan] [cyan]{text}[/cyan]")
         _play_chime()
         self._respond(text, ambient_context)
 
@@ -368,13 +382,14 @@ class VoicePipeline:
         # Mute mic during response
         self._muted = True
         try:
+            speaker_label = _voice_speaker_label()
             contextualized_query = query
             if ambient_context:
                 contextualized_query = (
-                    f"[Ambient conversation context — Travis was talking and then addressed you:\n"
+                    f"[Ambient conversation context — {speaker_label} was talking and then addressed you:\n"
                     f"{ambient_context}\n"
                     f"---\n"
-                    f"Travis said to you: {query}]"
+                    f"{speaker_label} said to you: {query}]"
                 )
 
             # Try fast path first

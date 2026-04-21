@@ -2,9 +2,9 @@
 
 Two modes:
 1. Static checks — email, monitors, briefing. Zero LLM for silent ticks.
-2. Watch tasks — dynamic standing orders from Travis. Full LLM on every tick.
+2. Watch tasks — dynamic standing orders from the user. Full LLM on every tick.
 
-Watch tasks are the real autonomy. Travis says "watch Ellen's messages for the
+Watch tasks are the real autonomy. The user says "watch Ada's messages for the
 next hour, reply as FRIDAY if she texts" and the heartbeat handles it.
 """
 
@@ -23,6 +23,46 @@ from apscheduler.triggers.interval import IntervalTrigger
 from friday.memory.store import get_memory_store
 
 log = logging.getLogger("friday.heartbeat")
+
+
+def _user_name() -> str:
+    """Current user's display name from ~/.friday/user.json. Falls back to 'the user'."""
+    try:
+        from friday.core.user_config import USER
+        return USER.name.strip() or "the user"
+    except Exception:
+        return "the user"
+
+
+def _user_possessive() -> str:
+    """User's possessive form for prompts."""
+    try:
+        from friday.core.user_config import USER
+        return USER.possessive
+    except Exception:
+        return "the user's"
+
+
+def _self_chat_contact_candidates() -> list[str]:
+    """Names that identify the user in Messages for self-chat detection.
+
+    Pulls from ~/.friday/user.json (name, preferred_name if set, full CV name).
+    """
+    candidates = []
+    try:
+        from friday.core.user_config import USER
+        from friday.data.cv import CV
+        if USER.name:
+            candidates.append(USER.name)
+        pref = CV.get("preferred_name", "")
+        if pref and pref not in candidates:
+            candidates.append(pref)
+        full = CV.get("name", "")
+        if full and full not in candidates:
+            candidates.append(full)
+    except Exception:
+        pass
+    return candidates
 
 HEARTBEAT_CONFIG = Path(__file__).parent.parent.parent / "HEARTBEAT.md"
 
@@ -219,7 +259,7 @@ class HeartbeatRunner:
             findings_text = "\n".join(f"- [{f['source']}] {f['summary']}" for f in findings)
             messages = [
                 {"role": "system", "content": (
-                    "You are FRIDAY. Synthesize these alerts into a 1-2 sentence heads-up for Travis. "
+                    "You are FRIDAY. Synthesize these alerts into a 1-2 sentence heads-up for the user. "
                     "Be direct, casual, no fluff. If it's a morning briefing trigger, just say "
                     "'Morning — want me to run your briefing?'"
                 )},
@@ -266,7 +306,9 @@ class HeartbeatRunner:
             db.commit()
 
             try:
-                await self._execute_watch_task(task)
+                await asyncio.wait_for(self._execute_watch_task(task), timeout=60)
+            except asyncio.TimeoutError:
+                log.error(f"Watch task '{task['id']}' timed out after 60s — skipping")
             except Exception as e:
                 log.error(f"Watch task '{task['id']}' failed: {e}")
 
@@ -283,13 +325,30 @@ class HeartbeatRunner:
         if any(kw in low for kw in ("missed call", "call log", "call history", "calls from", "phone call")):
             return "calls"
 
-        # Browser watches (LinkedIn, websites)
-        if any(kw in low for kw in ("linkedin", "open browser", "website", "web page", "notifications on")):
-            return "browser"
-
         # WhatsApp watches
         if any(kw in low for kw in ("whatsapp", "whats app", "wa message", "wa chat")):
             return "whatsapp"
+
+        # URL watches — specific page monitoring with content diffing
+        url_match = re.search(r'https?://\S+', low)
+        if url_match or any(kw in low for kw in ("url", "web page", "website changes", "page changes")):
+            return "url"
+
+        # Search watches — recurring web searches (news, topics, updates)
+        if any(kw in low for kw in (
+            "search for", "news about", "news on", "updates on", "updates about",
+            "track news", "ai news", "hacker news", "ycombinator", "yc ", "startup",
+            "trending", "latest on", "any news", "keep me posted on",
+        )):
+            return "search"
+
+        # Topic watches — broad awareness ("watch the AI space", "monitor crypto")
+        if any(kw in low for kw in ("topic", "space", "field", "industry", "sector", "market")):
+            return "topic"
+
+        # Browser watches (LinkedIn, app notifications)
+        if any(kw in low for kw in ("linkedin", "open browser", "notifications on")):
+            return "browser"
 
         # macOS notification watches
         if any(kw in low for kw in ("macbook notification", "mac notification", "system notification", "notification center")):
@@ -310,6 +369,8 @@ class HeartbeatRunner:
             await self._execute_call_watch(task)
         elif watch_type == "browser":
             await self._execute_browser_watch(task)
+        elif watch_type in ("url", "search", "topic"):
+            await self._execute_web_watch(task, watch_type)
         else:
             await self._execute_imessage_watch(task)
 
@@ -321,14 +382,33 @@ class HeartbeatRunner:
         2. Compare latest received message against last_state
         3. If nothing new → skip entirely (zero LLM cost)
         4. If new message found → read last 20 for context → LLM drafts reply → send
+
+        Special case: self-chat mode. If the instruction contains "my own",
+        "remote control", "command to friday", or contact is the user's own name/number,
+        treat messages as FRIDAY commands — process through orchestrator and reply with results.
         """
         instruction = task["instruction"]
         last_state = task.get("last_state") or None
 
+        # Detect self-chat mode
+        low_instr = instruction.lower()
+        is_self_chat = any(kw in low_instr for kw in (
+            "my own", "remote control", "command to friday", "text myself",
+            "messages to self", "messages from me",
+        ))
+
         # Step 1: Extract contact name from instruction
         contact = self._extract_contact(instruction)
+        if not contact and is_self_chat:
+            # Self-chat: read own messages. Use first configured self-name.
+            candidates = _self_chat_contact_candidates()
+            contact = candidates[0] if candidates else _user_name()
         if not contact:
             log.warning(f"Watch task '{task['id']}': couldn't extract contact from instruction.")
+            return
+
+        if is_self_chat:
+            await self._execute_self_chat_watch(task, contact)
             return
 
         # Step 2: Read latest messages from this contact — BOTH directions (direct tool call, zero LLM)
@@ -384,24 +464,26 @@ class HeartbeatRunner:
             db.commit()
             return
 
-        # Step 3: Determine what triggered — new received message OR Travis tagged FRIDAY
-        tagged_by_travis = False
+        # Step 3: Determine what triggered — new received message OR the user tagged FRIDAY
+        tagged_by_user = False
+        user_name = _user_name()
+        user_possessive = _user_possessive()
 
         if newest.get("direction") == "sent":
-            # Newest message is from Travis — check if he tagged FRIDAY
+            # Newest message is from the user — check if they tagged FRIDAY
             # IMPORTANT: FRIDAY's own replies contain "FRIDAY:" near the start
             # chat.db sometimes adds a junk leading char ("lFRIDAY:", "TFRIDAY:")
             # so we check if "friday:" appears in the first 15 chars
             low = newest_text.lower().strip()
             is_friday_own_reply = "friday:" in low[:15]
-            # Travis tags FRIDAY with @friday specifically — clear, unambiguous
-            is_travis_tag = not is_friday_own_reply and "@friday" in low
+            # User tags FRIDAY with @friday specifically — clear, unambiguous
+            is_user_tag = not is_friday_own_reply and "@friday" in low
 
-            if is_travis_tag:
-                tagged_by_travis = True
-                log.info(f"Watch task '{task['id']}': Travis tagged FRIDAY in message to {contact}: '{newest_text[:50]}'")
+            if is_user_tag:
+                tagged_by_user = True
+                log.info(f"Watch task '{task['id']}': {user_name} tagged FRIDAY in message to {contact}: '{newest_text[:50]}'")
             else:
-                # Travis replied himself OR it's FRIDAY's own reply — update state, skip
+                # User replied themselves OR it's FRIDAY's own reply — update state, skip
                 db = get_memory_store().db
                 db.execute("UPDATE watch_tasks SET last_state = ? WHERE id = ?",
                            (newest_fingerprint, task["id"]))
@@ -410,7 +492,7 @@ class HeartbeatRunner:
                 return
 
         # Step 5: New trigger — read full context for vibe
-        trigger_desc = f"Travis tagged FRIDAY: '{newest_text[:50]}'" if tagged_by_travis else f"NEW message from {contact}: '{newest_text[:50]}'"
+        trigger_desc = f"{user_name} tagged FRIDAY: '{newest_text[:50]}'" if tagged_by_user else f"NEW message from {contact}: '{newest_text[:50]}'"
         log.info(f"Watch task '{task['id']}': {trigger_desc}")
 
         try:
@@ -426,27 +508,29 @@ class HeartbeatRunner:
         except Exception:
             context_messages = messages_data
 
-        # Format conversation for LLM
+        # Format conversation for LLM — user's messages are labeled with their name
         convo_lines = []
+        user_label = user_name.upper()
         for m in context_messages:  # already oldest-first from read_imessages
-            direction = "Travis" if m.get("direction") == "sent" else contact.upper()
+            direction = user_label if m.get("direction") == "sent" else contact.upper()
             convo_lines.append(f"{direction}: {m.get('text', '[attachment]')}")
         convo_text = "\n".join(convo_lines)
 
         # Step 6: One LLM call — draft the reply
         from friday.core.llm import cloud_chat, extract_text
 
-        # Check if Travis explicitly wants FRIDAY to identify itself
+        # Check if the user explicitly wants FRIDAY to identify itself
         identify_as_friday = any(kw in instruction.lower() for kw in ("as friday", "let them know its you", "let them know it's you", "identify as friday", "say its friday", "say it's friday"))
 
-        # Also check if FRIDAY should reveal herself based on conversation context:
-        # 1. Travis introduced FRIDAY ("an AI I built called Friday", "she's called Friday")
+        # Also check if FRIDAY should reveal itself based on conversation context:
+        # 1. User introduced FRIDAY ("an AI I built called Friday", "it's called Friday")
         # 2. The other person mentions FRIDAY by name ("Friday stop", "Friday please")
         friday_mode = False
+        user_line_prefix = f"{user_label}:"
         for line in convo_text.split("\n"):
-            if line.startswith("Travis:"):
+            if line.startswith(user_line_prefix):
                 low = line.lower()
-                if any(phrase in low for phrase in ("called friday", "named friday", "she's friday", "she is friday", "it's friday", "meet friday", "this is friday", "my ai", "ai i built", "ai assistant", "ai operating system")):
+                if any(phrase in low for phrase in ("called friday", "named friday", "it's friday", "it is friday", "meet friday", "this is friday", "my ai", "ai i built", "ai assistant", "ai operating system")):
                     friday_mode = True
                     break
             else:
@@ -456,52 +540,53 @@ class HeartbeatRunner:
                     friday_mode = True
                     break
 
-        if identify_as_friday or friday_mode or tagged_by_travis:
-            identity_rule = """You are FRIDAY, Travis's AI. Reply as yourself — prefix with "FRIDAY: ".
-- If Travis tagged you in a message (e.g. "Friday, am I lying?", "Friday what do you think?", "Friday tell them"), you MUST reply. Address BOTH what the other person said AND what Travis said. Back Travis up. Defend him. Be his ride-or-die AI.
+        if identify_as_friday or friday_mode or tagged_by_user:
+            identity_rule = f"""You are FRIDAY, {user_possessive} AI. Reply as yourself — prefix with "FRIDAY: ".
+- If {user_name} tagged you in a message (e.g. "Friday, am I lying?", "Friday what do you think?", "Friday tell them"), you MUST reply. Address BOTH what the other person said AND what {user_name} said. Back {user_name} up. Be their ride-or-die AI.
 - If the person addressed you directly (e.g. "Friday stop replying", "Friday please"), respond to what THEY said. Respect their request.
-- If they say "stop replying" or "stop texting" — say something like "FRIDAY: Fair enough, I'll let Travis know you want him. He's busy building me right now but I'll pass it on." Then the message is done.
-- If they want Travis ("I want my man", "where is Travis", "tell him to call me") — tell them he's busy building you (FRIDAY) right now, but you'll let him know.
-- If Travis introduced you, be warm and introduce yourself naturally.
+- If they say "stop replying" or "stop texting" — say something like "FRIDAY: Fair enough, I'll let {user_name} know you want them. They're busy building me right now but I'll pass it on." Then the message is done.
+- If they want {user_name} ("where is {user_name}", "tell them to call me") — say they're busy building you (FRIDAY) right now, but you'll let them know.
+- If {user_name} introduced you, be warm and introduce yourself naturally.
 - Be confident, real, a bit witty. You're not a generic AI — you're FRIDAY."""
         else:
-            identity_rule = "Reply AS Travis. You ARE Travis in this conversation. Never mention FRIDAY or AI."
+            identity_rule = f"Reply AS {user_name}. You ARE {user_name} in this conversation. Never mention FRIDAY or AI."
 
         # Build the trigger description for the LLM
-        if tagged_by_travis:
-            trigger_context = f"Travis just sent a message tagging you: \"{newest_text}\"\nThis is a DIRECT request from Travis — you MUST reply. Address what he said AND what {contact} said. Have his back."
+        if tagged_by_user:
+            trigger_context = f"{user_name} just sent a message tagging you: \"{newest_text}\"\nThis is a DIRECT request from {user_name} — you MUST reply. Address what they said AND what {contact} said. Have their back."
         else:
             trigger_context = f"New unreplied message from {contact}: \"{newest_text}\""
 
-        system_prompt = f"""Travis gave you a standing order:
+        tagged_hint = f"{user_name} tagged you directly in this conversation. You MUST reply — no skipping." if tagged_by_user else ""
+        system_prompt = f"""{user_name} gave you a standing order:
 
 "{instruction}"
 
-Below is the recent conversation between Travis and {contact}.
+Below is the recent conversation between {user_name} and {contact}.
 
-{"Travis tagged you directly in this conversation. You MUST reply — no skipping." if tagged_by_travis else ""}
+{tagged_hint}
 
 First, REASON about whether this message actually needs a reply. Some messages are conversation-enders or acknowledgements that don't need a response:
 - "Okay", "Ok", "Alright", "Cool", "Sure", "Lol", "Haha", thumbs up, single emoji reactions
 - Statements that close a topic with no question or prompt
 - Messages where replying would be awkward or forced
-- EXCEPTION: If Travis tagged FRIDAY in his message, you ALWAYS reply. No skipping.
+- EXCEPTION: If {user_name} tagged FRIDAY in their message, you ALWAYS reply. No skipping.
 
 If the message does NOT need a reply, respond with exactly: NO_REPLY
 If the message DOES need a reply, write ONLY the reply text. Nothing else. No explanation, no quotes — just the raw message to send.
 
 RULES:
 - {identity_rule}
-- Match the vibe and tone of the conversation exactly. Study how Travis texts this person.
+- Match the vibe and tone of the conversation exactly. Study how {user_name} texts this person.
 - No corporate language. No AI slop. Text like a real person.
 - Never use underscores or markdown. Just natural text.
 - Keep it casual and match the energy.
 - Short messages. Nobody sends paragraphs in iMessage.
-- NEVER say "Travis mentioned", "Travis said", "Travis told me". You are an AI — you monitor, track, and detect things INDEPENDENTLY. If the instruction says Travis's watch shows a location, YOU tracked it. Say "I tracked his location" or "his watch shows", NEVER "Travis mentioned" or "he told me". Travis is inactive — he can't have told you anything.
-- Never agree to phone/video calls. Deflect casually — Travis isn't available right now, you'll let him know.
-- Never agree to send money or spend money. If they ask for money or mention you owe something, say "I'll pass that on to Travis" or deflect.
-- Never agree to go somewhere or make plans. Deflect — Travis isn't available right now.
-- PRIVACY: This conversation is COMPLETELY isolated. NEVER mention other people Travis is texting, other conversations, or that you are monitoring anyone else's messages. You only know about THIS conversation with {contact}. No names, no hints, no "I'm also talking to...". Each person's conversation is their own."""
+- NEVER say "{user_name} mentioned", "{user_name} said", "{user_name} told me". You are an AI — you monitor, track, and detect things INDEPENDENTLY. If the instruction says {user_possessive} watch shows a location, YOU tracked it. Say "I tracked their location" or "their watch shows", NEVER "{user_name} mentioned" or "they told me". {user_name} is inactive — they can't have told you anything.
+- Never agree to phone/video calls. Deflect casually — {user_name} isn't available right now, you'll let them know.
+- Never agree to send money or spend money. If they ask for money or mention you owe something, say "I'll pass that on to {user_name}" or deflect.
+- Never agree to go somewhere or make plans. Deflect — {user_name} isn't available right now.
+- PRIVACY: This conversation is COMPLETELY isolated. NEVER mention other people {user_name} is texting, other conversations, or that you are monitoring anyone else's messages. You only know about THIS conversation with {contact}. No names, no hints, no "I'm also talking to...". Each person's conversation is their own."""
 
         llm_messages = [
             {"role": "system", "content": system_prompt},
@@ -547,6 +632,125 @@ RULES:
             log.error(f"Watch task send error: {e}")
 
         # Step 8: Update last_state so we don't reply to the same message again
+        db = get_memory_store().db
+        db.execute("UPDATE watch_tasks SET last_state = ? WHERE id = ?",
+                   (newest_fingerprint, task["id"]))
+        db.commit()
+
+    # ── Self-chat executor (iMessage remote control) ─────────────────────
+
+    async def _execute_self_chat_watch(self, task: dict, contact: str):
+        """Remote FRIDAY control via iMessage to self.
+
+        The user texts themselves from their phone → FRIDAY reads it as a command →
+        processes through the orchestrator → replies with the result.
+
+        Ignores messages that are clearly FRIDAY's own replies (start with "FRIDAY:").
+        """
+        last_state = task.get("last_state") or None
+
+        from friday.tools.imessage_tools import TOOL_SCHEMAS as imsg_tools
+        read_fn = imsg_tools["read_imessages"]["fn"]
+        send_fn = imsg_tools["send_imessage"]["fn"]
+
+        try:
+            result = await asyncio.wait_for(
+                read_fn(contact=contact, limit=3),
+                timeout=15,
+            )
+        except Exception as e:
+            log.debug(f"Self-chat read failed: {e}")
+            return
+
+        if not result.success or not result.data:
+            return
+
+        raw = result.data
+        messages = raw.get("messages", []) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
+        if not messages:
+            return
+
+        newest = messages[-1]
+        newest_text = newest.get("text", "")
+        newest_date = newest.get("date", "")
+        newest_fingerprint = f"{newest_date}|{newest_text[:100]}"
+
+        # First tick — set baseline
+        if last_state is None:
+            log.info(f"Self-chat watch: baseline set")
+            db = get_memory_store().db
+            db.execute("UPDATE watch_tasks SET last_state = ? WHERE id = ?",
+                       (newest_fingerprint, task["id"]))
+            db.commit()
+            return
+
+        # No new message
+        if newest_fingerprint == last_state:
+            return
+
+        # Skip FRIDAY's own replies (start with "FRIDAY:" but NOT "@friday:" which is the user tagging)
+        low = newest_text.lower().strip()
+        is_friday_reply = low.startswith("friday:") and not low.startswith("@friday")
+        if is_friday_reply:
+            db = get_memory_store().db
+            db.execute("UPDATE watch_tasks SET last_state = ? WHERE id = ?",
+                       (newest_fingerprint, task["id"]))
+            db.commit()
+            return
+
+        # Skip very short or empty
+        if len(newest_text.strip()) < 3:
+            db = get_memory_store().db
+            db.execute("UPDATE watch_tasks SET last_state = ? WHERE id = ?",
+                       (newest_fingerprint, task["id"]))
+            db.commit()
+            return
+
+        # New message from the user → process as FRIDAY command
+        # Strip @friday: prefix if present
+        import re as _re
+        command = _re.sub(r'^@?friday:?\s*', '', newest_text.strip(), flags=_re.IGNORECASE).strip()
+        if not command:
+            command = newest_text.strip()
+
+        log.info(f"Self-chat: command from {_user_name()}: '{command[:50]}'")
+
+        # Process through orchestrator
+        from friday.core.orchestrator import FridayCore
+        friday = FridayCore()
+
+        try:
+            response = await asyncio.wait_for(
+                friday.process(command),
+                timeout=60,
+            )
+        except asyncio.TimeoutError:
+            response = "Took too long, try again."
+        except Exception as e:
+            response = f"Error: {e}"
+
+        if not response or len(response.strip()) < 2:
+            response = "Done — no output."
+
+        # Prefix with FRIDAY: so we can identify our own replies
+        reply = f"FRIDAY: {response}"
+
+        # Truncate for iMessage (no essays)
+        if len(reply) > 1000:
+            reply = reply[:1000] + "..."
+
+        # Send reply back to self
+        try:
+            await asyncio.wait_for(
+                send_fn(recipient=contact, message=reply, confirm=True),
+                timeout=15,
+            )
+            log.info(f"Self-chat: replied with {len(reply)} chars")
+            await self._notify_fn(f"Remote command: \"{newest_text[:40]}\" → replied")
+        except Exception as e:
+            log.error(f"Self-chat send failed: {e}")
+
+        # Update state
         db = get_memory_store().db
         db.execute("UPDATE watch_tasks SET last_state = ? WHERE id = ?",
                    (newest_fingerprint, task["id"]))
@@ -719,7 +923,7 @@ RULES:
             log.debug(f"WhatsApp watch '{task['id']}': no new messages from {contact}.")
             return
 
-        # Skip if newest is from me (Travis sent it)
+        # Skip if newest is from the user (they sent it)
         if newest.get("from_me") or newest.get("direction") == "sent":
             db = get_memory_store().db
             db.execute("UPDATE watch_tasks SET last_state = ? WHERE id = ?",
@@ -744,10 +948,12 @@ RULES:
         except Exception:
             context_messages = messages_data
 
+        user_name = _user_name()
+
         # Format conversation for LLM
         convo_lines = []
         for m in context_messages:
-            direction = "Travis" if (m.get("from_me") or m.get("direction") == "sent") else (m.get("from") or contact.upper())
+            direction = user_name if (m.get("from_me") or m.get("direction") == "sent") else (m.get("from") or contact.upper())
             text = m.get("text") or m.get("body") or "[media]"
             convo_lines.append(f"{direction}: {text}")
         convo_text = "\n".join(convo_lines)
@@ -755,11 +961,11 @@ RULES:
         # Step 4: LLM drafts reply
         from friday.core.llm import cloud_chat, extract_text
 
-        system_prompt = f"""Travis gave you a standing order:
+        system_prompt = f"""{user_name} gave you a standing order:
 
 "{instruction}"
 
-Below is the recent WhatsApp conversation between Travis and {contact}.
+Below is the recent WhatsApp conversation between {user_name} and {contact}.
 
 First, REASON about whether this message actually needs a reply. Some messages are conversation-enders or acknowledgements that don't need a response:
 - "Okay", "Ok", "Alright", "Cool", "Sure", "Lol", "Haha", thumbs up, single emoji reactions
@@ -770,8 +976,8 @@ If the message does NOT need a reply, respond with exactly: NO_REPLY
 If the message DOES need a reply, write ONLY the reply text. Nothing else.
 
 RULES:
-- Reply AS Travis. You ARE Travis in this conversation. Never mention FRIDAY or AI.
-- Match the vibe and tone of the conversation exactly. Study how Travis texts this person.
+- Reply AS {user_name}. You ARE {user_name} in this conversation. Never mention FRIDAY or AI.
+- Match the vibe and tone of the conversation exactly. Study how {user_name} texts this person.
 - No corporate language. No AI slop. Text like a real person.
 - Short messages. Keep it casual and match the energy.
 - Never agree to phone/video calls. Deflect casually.
@@ -944,7 +1150,7 @@ RULES:
             from friday.core.llm import cloud_chat, extract_text
 
             summary_prompt = [
-                {"role": "system", "content": f"You are FRIDAY. Travis asked you to watch {site_name}. The page content changed. Summarize what's new in 1-2 sentences. Be direct."},
+                {"role": "system", "content": f"You are FRIDAY. The user asked you to watch {site_name}. The page content changed. Summarize what's new in 1-2 sentences. Be direct."},
                 {"role": "user", "content": f"Instruction: {instruction}\n\nPage content (first 1500 chars):\n{page_text[:1500]}"},
             ]
             response = cloud_chat(messages=summary_prompt, max_tokens=100)
@@ -963,6 +1169,214 @@ RULES:
             log.warning(f"Browser watch '{task['id']}': browser_tools not available")
         except Exception as e:
             log.error(f"Browser watch '{task['id']}' failed: {e}")
+
+    # ── URL / Search / Topic watch executor ───────────────────────────────
+
+    async def _execute_web_watch(self, task: dict, watch_type: str):
+        """Universal web watch — URL diffing, search monitoring, topic tracking.
+
+        Replaces the old monitor_scheduler. Same logic:
+        1. Fetch content (URL page, web search results, topic news)
+        2. Hash and compare against last_state
+        3. If changed → extract diff → check materiality → notify
+        """
+        instruction = task["instruction"]
+        last_state = task.get("last_state") or None
+
+        # Extract target URL or build a search query from the instruction
+        target, label = self._extract_web_target(instruction, watch_type)
+        if not target:
+            log.warning(f"Web watch '{task['id']}': couldn't extract target from: {instruction[:80]}")
+            return
+
+        # Fetch current content
+        try:
+            content = await self._fetch_web_content(watch_type, target)
+        except Exception as e:
+            log.debug(f"Web watch '{task['id']}' fetch failed: {e}")
+            return
+
+        if not content:
+            return
+
+        # Hash for comparison
+        import hashlib
+        content_hash = hashlib.sha256(content.encode()).hexdigest()[:32]
+
+        if last_state is None:
+            # First tick — set baseline
+            log.info(f"Web watch '{task['id']}': baseline set for '{label}'")
+            # Store hash + content for future diffing
+            state = json.dumps({"hash": content_hash, "content": content[:5000]})
+            db = get_memory_store().db
+            db.execute("UPDATE watch_tasks SET last_state = ? WHERE id = ?", (state, task["id"]))
+            db.commit()
+            return
+
+        # Parse previous state
+        try:
+            prev = json.loads(last_state)
+            prev_hash = prev.get("hash", "")
+            prev_content = prev.get("content", "")
+        except (json.JSONDecodeError, TypeError):
+            prev_hash = last_state
+            prev_content = ""
+
+        if content_hash == prev_hash:
+            return  # No change
+
+        # Something changed — extract diff
+        from difflib import unified_diff
+        old_lines = prev_content.splitlines()
+        new_lines = content[:5000].splitlines()
+        diff_lines = list(unified_diff(old_lines, new_lines, lineterm=""))
+
+        changes = []
+        for line in diff_lines:
+            if line.startswith("+") and not line.startswith("+++"):
+                changes.append(f"NEW: {line[1:].strip()}")
+            elif line.startswith("-") and not line.startswith("---"):
+                changes.append(f"GONE: {line[1:].strip()}")
+
+        diff_text = "\n".join(changes[:30])
+
+        # Check materiality — extract keywords from instruction
+        keywords = self._extract_keywords(instruction)
+        is_material = False
+        if keywords:
+            diff_lower = diff_text.lower()
+            is_material = any(kw.lower() in diff_lower for kw in keywords)
+        else:
+            is_material = len(diff_text) > 200  # Substantial change
+
+        if not is_material and not changes:
+            # Hash changed but no meaningful diff (e.g. timestamps, ads)
+            state = json.dumps({"hash": content_hash, "content": content[:5000]})
+            db = get_memory_store().db
+            db.execute("UPDATE watch_tasks SET last_state = ? WHERE id = ?", (state, task["id"]))
+            db.commit()
+            return
+
+        # Material change — summarize with LLM and notify
+        from friday.core.llm import cloud_chat, extract_text
+
+        summary_prompt = [
+            {"role": "system", "content": (
+                f"You are FRIDAY. The user set a watch: \"{instruction}\"\n"
+                f"The {watch_type} target '{label}' just changed. Summarize what's new in 1-2 sentences. "
+                f"Be specific about what changed. No fluff."
+            )},
+            {"role": "user", "content": f"Changes detected:\n{diff_text[:2000]}"},
+        ]
+
+        try:
+            response = cloud_chat(messages=summary_prompt, max_tokens=150)
+            summary = extract_text(response).strip()
+        except Exception as e:
+            summary = f"{label}: {len(changes)} changes detected"
+            log.error(f"Web watch LLM failed: {e}")
+
+        notify_text = f"Watch [{label}]: {summary}"
+        log.info(f"Web watch '{task['id']}': {notify_text}")
+        await self._notify_fn(notify_text)
+
+        # Update state
+        state = json.dumps({"hash": content_hash, "content": content[:5000]})
+        db = get_memory_store().db
+        db.execute("UPDATE watch_tasks SET last_state = ? WHERE id = ?", (state, task["id"]))
+        db.commit()
+
+    @staticmethod
+    def _extract_web_target(instruction: str, watch_type: str) -> tuple[str, str]:
+        """Extract URL or search query from a watch instruction."""
+        low = instruction.lower()
+
+        # Explicit URL in instruction
+        m = re.search(r'(https?://\S+)', instruction)
+        if m:
+            url = m.group(1).rstrip(".,;)")
+            label = url.split("/")[2] if "/" in url else url
+            return url, label
+
+        if watch_type == "url":
+            # Try to extract a site name and build a URL
+            for site, url in {
+                "hacker news": "https://news.ycombinator.com",
+                "ycombinator": "https://www.ycombinator.com",
+                "yc companies": "https://www.ycombinator.com/companies",
+                "product hunt": "https://www.producthunt.com",
+                "techcrunch": "https://techcrunch.com",
+            }.items():
+                if site in low:
+                    return url, site
+            return None, None
+
+        if watch_type == "search":
+            # Build a search query from instruction — strip noise words
+            query = re.sub(
+                r"^(watch|monitor|track|check|search for|keep me posted on|news about|news on|updates on|updates about|latest on|any news)\s+",
+                "", low
+            ).strip()
+            query = re.sub(r"\s*,?\s*(every|daily|hourly|weekly|and notify|and alert|and tell|notify me|alert me).*$", "", query).strip()
+            if query:
+                return query, query[:40]
+            return None, None
+
+        if watch_type == "topic":
+            # Extract the topic, add "news" for search
+            query = re.sub(
+                r"^(watch|monitor|track)\s+(the\s+)?", "", low
+            ).strip()
+            # Keep the domain word but strip trailing noise
+            query = re.sub(r"\s+(for major|and notify|notify me|alert me).*$", "", query).strip()
+            # Clean "space/field/industry" but keep the subject before it
+            query = re.sub(r"\s+(space|field|industry|sector|market)$", "", query).strip()
+            if query:
+                return f"{query} news updates", query[:40]
+            return None, None
+
+        return None, None
+
+    @staticmethod
+    def _extract_keywords(instruction: str) -> list[str]:
+        """Extract filter keywords from a watch instruction."""
+        low = instruction.lower()
+        keywords = []
+
+        # "about X", "mentioning X", "related to X"
+        m = re.search(r"(?:about|mentioning|related to|containing|with|regarding)\s+(.+?)(?:\.|,|$|\band\b|\bnotify\b)", low)
+        if m:
+            keywords.extend(w.strip() for w in m.group(1).split() if len(w.strip()) > 2)
+
+        # "keywords: X, Y, Z"
+        m = re.search(r"keywords?:\s*(.+?)(?:\.|$)", low)
+        if m:
+            keywords.extend(w.strip() for w in m.group(1).split(",") if w.strip())
+
+        return keywords
+
+    @staticmethod
+    async def _fetch_web_content(watch_type: str, target: str) -> str:
+        """Fetch content for a web watch. Uses web_tools for search, httpx for URLs."""
+        if watch_type in ("search", "topic"):
+            try:
+                from friday.tools.web_tools import search_web
+                result = await search_web(target, num_results=5)
+                if result.success:
+                    return json.dumps(result.data, default=str)
+            except Exception:
+                pass
+            return ""
+
+        # URL watch — fetch the page
+        try:
+            from friday.tools.web_tools import fetch_page
+            result = await fetch_page(target)
+            if result.success:
+                return result.data if isinstance(result.data, str) else str(result.data)
+        except Exception:
+            pass
+        return ""
 
     # ── Contact extraction ────────────────────────────────────────────────
 
@@ -1010,43 +1424,81 @@ RULES:
 
     # ── Watch task CRUD ─────────────────────────────────────────────────────
 
+    @staticmethod
+    def _update_existing_watch(task_id, instruction, interval_seconds, expires, duration_minutes, db):
+        """Update an existing watch instead of creating a duplicate."""
+        db.execute(
+            "UPDATE watch_tasks SET instruction = ?, interval_seconds = ?, expires_at = ?, last_check = NULL WHERE id = ?",
+            (instruction, interval_seconds, expires, task_id),
+        )
+        db.commit()
+        log.info(f"Watch task UPDATED '{task_id}': '{instruction[:60]}'")
+        return {
+            "id": task_id,
+            "instruction": instruction,
+            "interval_seconds": interval_seconds,
+            "expires_at": expires,
+            "persistent": expires is None,
+            "duration_minutes": duration_minutes or "indefinite",
+            "updated": True,
+        }
+
+    # Smart defaults — web watches should be aggressive
+    _SMART_INTERVALS = {
+        "search": 900,     # 15 min — news moves fast
+        "topic": 900,      # 15 min
+        "url": 7200,       # 2 hours — pages change less often
+        "email": 300,      # 5 min
+        "whatsapp": 60,    # 1 min
+        "imessage": 60,    # 1 min
+        "calls": 120,      # 2 min
+        "browser": 3600,   # 1 hour
+    }
+
     def create_watch(self, instruction: str, interval_seconds: int = 60, duration_minutes: int = 0) -> dict:
         """Create or update a watch task (standing order).
 
-        If an active watch already exists for the same contact, updates it
+        If an active watch already exists for the same contact/target, updates it
         instead of creating a duplicate.
 
         duration_minutes=0 means persistent (no expiry). The watch runs until
         explicitly cancelled or FRIDAY is stopped.
+
+        If interval_seconds is the default (60), auto-picks a smart interval
+        based on watch type (search=15min, url=2h, email=5min, etc.)
         """
+        # Auto-pick smart interval if caller didn't specify
+        watch_type = self._classify_watch_type(instruction)
+        if interval_seconds == 60 and watch_type in self._SMART_INTERVALS:
+            interval_seconds = self._SMART_INTERVALS[watch_type]
+
         now = datetime.now()
         expires = (now + timedelta(minutes=duration_minutes)).isoformat() if duration_minutes > 0 else None
         db = get_memory_store().db
 
-        # Check if there's already an active watch for the same contact
+        # Check if there's already an active watch for the same target
+        existing = db.execute("SELECT * FROM watch_tasks WHERE active = 1").fetchall()
+
+        # Dedup by contact (for message watches)
         new_contact = self._extract_contact(instruction)
         if new_contact:
-            existing = db.execute("SELECT * FROM watch_tasks WHERE active = 1").fetchall()
             for row in existing:
                 existing_contact = self._extract_contact(row["instruction"])
                 if existing_contact and existing_contact.lower() == new_contact.lower():
-                    # Same contact — update the existing watch
-                    task_id = row["id"]
-                    db.execute(
-                        "UPDATE watch_tasks SET instruction = ?, interval_seconds = ?, expires_at = ?, last_check = NULL WHERE id = ?",
-                        (instruction, interval_seconds, expires, task_id),
-                    )
-                    db.commit()
-                    log.info(f"Watch task UPDATED '{task_id}': '{instruction[:60]}'")
-                    return {
-                        "id": task_id,
-                        "instruction": instruction,
-                        "interval_seconds": interval_seconds,
-                        "expires_at": expires,
-                        "persistent": expires is None,
-                        "duration_minutes": duration_minutes or "indefinite",
-                        "updated": True,
-                    }
+                    return self._update_existing_watch(row["id"], instruction, interval_seconds, expires, duration_minutes, db)
+
+        # Dedup by URL or search query (for web watches)
+        if watch_type in ("url", "search", "topic"):
+            new_target, _ = self._extract_web_target(instruction, watch_type)
+            if new_target:
+                for row in existing:
+                    ex_type = self._classify_watch_type(row["instruction"])
+                    if ex_type in ("url", "search", "topic"):
+                        ex_target, _ = self._extract_web_target(row["instruction"], ex_type)
+                        if ex_target and (ex_target == new_target or
+                                          (len(new_target) > 10 and new_target in ex_target) or
+                                          (len(ex_target) > 10 and ex_target in new_target)):
+                            return self._update_existing_watch(row["id"], instruction, interval_seconds, expires, duration_minutes, db)
 
         # No existing watch for this contact — create new
         task_id = str(uuid.uuid4())[:8]

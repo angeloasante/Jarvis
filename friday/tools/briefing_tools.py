@@ -219,8 +219,7 @@ TOOL_SCHEMAS = {
                     "properties": {
                         "time_of_day": {
                             "type": "string",
-                            "enum": ["morning", "evening"],
-                            "description": "Morning or evening digest",
+                            "description": "Type of digest: morning, evening, or quick",
                         },
                     },
                     "required": [],

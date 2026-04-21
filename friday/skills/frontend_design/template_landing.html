@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{BRAND_NAME}}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
+        }
+      }
+    }
+  </script>
+  <style>
+    @keyframes fadeUp { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes glow { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.8; } }
+    .animate-fade-up { animation: fadeUp 0.7s ease-out forwards; }
+    .delay-1 { animation-delay: 0.1s; opacity: 0; }
+    .delay-2 { animation-delay: 0.2s; opacity: 0; }
+    .delay-3 { animation-delay: 0.3s; opacity: 0; }
+    .delay-4 { animation-delay: 0.4s; opacity: 0; }
+    .glow-blob { animation: glow 4s ease-in-out infinite; }
+  </style>
+</head>
+<body class="bg-[#09090b] text-gray-100 font-sans antialiased">
+
+  <!-- Navbar -->
+  <nav class="fixed top-0 w-full z-50 bg-[#09090b]/80 backdrop-blur-xl border-b border-white/5">
+    <div class="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+      <a href="#" class="text-lg font-bold tracking-tight text-white">{{BRAND_NAME}}</a>
+      <div class="hidden md:flex items-center gap-8">
+        <a href="#features" class="text-sm text-gray-400 hover:text-white transition-colors">Features</a>
+        <a href="#stats" class="text-sm text-gray-400 hover:text-white transition-colors">Proof</a>
+        <a href="#cta" class="text-sm text-gray-400 hover:text-white transition-colors">Pricing</a>
+        <a href="#" class="ml-2 px-5 py-2 text-sm font-medium bg-white text-black rounded-lg hover:bg-gray-200 transition-all">Get Started</a>
+      </div>
+      <button class="md:hidden text-gray-400">
+        <i data-lucide="menu" class="w-5 h-5"></i>
+      </button>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="relative min-h-screen flex items-center justify-center px-6 overflow-hidden">
+    <!-- Background glow -->
+    <div class="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-indigo-600/20 rounded-full blur-[128px] glow-blob pointer-events-none"></div>
+    <div class="absolute top-1/2 left-1/3 w-[400px] h-[400px] bg-purple-600/15 rounded-full blur-[100px] glow-blob pointer-events-none" style="animation-delay: 2s;"></div>
+
+    <div class="relative max-w-4xl mx-auto text-center animate-fade-up">
+      <div class="inline-flex items-center gap-2 px-4 py-1.5 mb-8 text-xs font-medium tracking-wide uppercase bg-white/5 border border-white/10 rounded-full text-indigo-300">
+        <span class="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-pulse"></span>
+        {{BADGE_TEXT}}
+      </div>
+      <h1 class="text-5xl sm:text-6xl md:text-7xl lg:text-8xl font-black tracking-tight leading-[0.95] mb-8">
+        {{HERO_LINE_1}}<br>
+        <span class="bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">{{HERO_LINE_2}}</span>
+      </h1>
+      <p class="text-lg md:text-xl text-gray-400 max-w-2xl mx-auto mb-10 leading-relaxed">
+        {{HERO_DESCRIPTION}}
+      </p>
+      <div class="flex flex-col sm:flex-row gap-4 justify-center">
+        <a href="#" class="group px-8 py-4 bg-white text-black font-semibold rounded-xl hover:bg-gray-100 transition-all transform hover:scale-[1.02] shadow-lg shadow-white/10">
+          {{CTA_PRIMARY}}
+          <i data-lucide="arrow-right" class="inline w-4 h-4 ml-2 group-hover:translate-x-1 transition-transform"></i>
+        </a>
+        <a href="#" class="px-8 py-4 font-semibold rounded-xl border border-white/10 text-gray-300 hover:bg-white/5 hover:border-white/20 transition-all">
+          {{CTA_SECONDARY}}
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section id="features" class="py-24 px-6">
+    <div class="max-w-6xl mx-auto">
+      <div class="text-center mb-16 animate-fade-up">
+        <h2 class="text-3xl md:text-4xl font-bold mb-4">{{FEATURES_TITLE}}</h2>
+        <p class="text-gray-400 max-w-xl mx-auto">{{FEATURES_SUBTITLE}}</p>
+      </div>
+      <div class="grid md:grid-cols-3 gap-6">
+        <!-- Feature 1 -->
+        <div class="group p-8 bg-white/[0.02] rounded-2xl border border-white/5 hover:border-indigo-500/30 hover:bg-white/[0.04] transition-all duration-300 animate-fade-up delay-1">
+          <div class="w-12 h-12 bg-indigo-500/10 rounded-xl flex items-center justify-center mb-5 group-hover:bg-indigo-500/20 transition-colors">
+            <i data-lucide="{{FEATURE_1_ICON}}" class="w-6 h-6 text-indigo-400"></i>
+          </div>
+          <h3 class="text-lg font-semibold text-white mb-3">{{FEATURE_1_TITLE}}</h3>
+          <p class="text-sm text-gray-400 leading-relaxed">{{FEATURE_1_DESC}}</p>
+        </div>
+        <!-- Feature 2 -->
+        <div class="group p-8 bg-white/[0.02] rounded-2xl border border-white/5 hover:border-purple-500/30 hover:bg-white/[0.04] transition-all duration-300 animate-fade-up delay-2">
+          <div class="w-12 h-12 bg-purple-500/10 rounded-xl flex items-center justify-center mb-5 group-hover:bg-purple-500/20 transition-colors">
+            <i data-lucide="{{FEATURE_2_ICON}}" class="w-6 h-6 text-purple-400"></i>
+          </div>
+          <h3 class="text-lg font-semibold text-white mb-3">{{FEATURE_2_TITLE}}</h3>
+          <p class="text-sm text-gray-400 leading-relaxed">{{FEATURE_2_DESC}}</p>
+        </div>
+        <!-- Feature 3 -->
+        <div class="group p-8 bg-white/[0.02] rounded-2xl border border-white/5 hover:border-pink-500/30 hover:bg-white/[0.04] transition-all duration-300 animate-fade-up delay-3">
+          <div class="w-12 h-12 bg-pink-500/10 rounded-xl flex items-center justify-center mb-5 group-hover:bg-pink-500/20 transition-colors">
+            <i data-lucide="{{FEATURE_3_ICON}}" class="w-6 h-6 text-pink-400"></i>
+          </div>
+          <h3 class="text-lg font-semibold text-white mb-3">{{FEATURE_3_TITLE}}</h3>
+          <p class="text-sm text-gray-400 leading-relaxed">{{FEATURE_3_DESC}}</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Stats -->
+  <section id="stats" class="py-20 px-6 border-y border-white/5">
+    <div class="max-w-5xl mx-auto grid grid-cols-2 md:grid-cols-4 gap-10 text-center animate-fade-up">
+      <div>
+        <div class="text-4xl font-black text-white">{{STAT_1_NUM}}</div>
+        <div class="text-sm text-gray-500 mt-2">{{STAT_1_LABEL}}</div>
+      </div>
+      <div>
+        <div class="text-4xl font-black text-white">{{STAT_2_NUM}}</div>
+        <div class="text-sm text-gray-500 mt-2">{{STAT_2_LABEL}}</div>
+      </div>
+      <div>
+        <div class="text-4xl font-black text-white">{{STAT_3_NUM}}</div>
+        <div class="text-sm text-gray-500 mt-2">{{STAT_3_LABEL}}</div>
+      </div>
+      <div>
+        <div class="text-4xl font-black text-white">{{STAT_4_NUM}}</div>
+        <div class="text-sm text-gray-500 mt-2">{{STAT_4_LABEL}}</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section id="cta" class="py-24 px-6">
+    <div class="max-w-3xl mx-auto text-center animate-fade-up">
+      <div class="relative p-12 md:p-16 rounded-3xl border border-white/5 bg-gradient-to-br from-indigo-600/10 via-purple-600/10 to-pink-600/10 overflow-hidden">
+        <div class="absolute inset-0 bg-[radial-gradient(circle_at_50%_120%,rgba(120,80,255,0.15),transparent_60%)]"></div>
+        <div class="relative">
+          <h2 class="text-3xl md:text-4xl font-bold text-white mb-4">{{CTA_TITLE}}</h2>
+          <p class="text-gray-400 mb-8 max-w-lg mx-auto">{{CTA_DESC}}</p>
+          <a href="#" class="inline-flex items-center gap-2 px-8 py-4 bg-white text-black font-semibold rounded-xl hover:bg-gray-100 transition-all transform hover:scale-[1.02]">
+            {{CTA_BUTTON}}
+            <i data-lucide="arrow-right" class="w-4 h-4"></i>
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="py-10 px-6 border-t border-white/5">
+    <div class="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
+      <span class="text-sm text-gray-600">&copy; 2026 {{BRAND_NAME}}. All rights reserved.</span>
+      <div class="flex items-center gap-6">
+        <a href="#" class="text-sm text-gray-500 hover:text-white transition-colors">Twitter</a>
+        <a href="#" class="text-sm text-gray-500 hover:text-white transition-colors">GitHub</a>
+        <a href="#" class="text-sm text-gray-500 hover:text-white transition-colors">Contact</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>lucide.createIcons();</script>
+</body>
+</html>

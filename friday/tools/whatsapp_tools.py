@@ -34,18 +34,47 @@ def _get_client() -> httpx.AsyncClient:
     return _client
 
 
+def _kill_stale_bridge():
+    """Kill any existing node server.js processes hogging port 3100."""
+    import os
+    my_pid = str(os.getpid())
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", ":3100"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.stdout.strip():
+            pids = result.stdout.strip().split("\n")
+            for pid in pids:
+                pid = pid.strip()
+                if pid == my_pid:
+                    continue  # Don't kill ourselves (httpx keep-alive socket)
+                try:
+                    subprocess.run(["kill", pid], timeout=5)
+                    logger.info(f"[WhatsApp] Killed stale process on port 3100 (PID {pid})")
+                except Exception:
+                    pass
+            import time
+            time.sleep(1)
+    except Exception:
+        pass
+
+
 async def _ensure_bridge() -> bool:
     """Auto-start the bridge if it's not running. Returns True if bridge is up."""
     global _bridge_process
 
-    # Check if already running
+    # Check if already running (any response = bridge is alive)
     try:
         r = await _get_client().get("/status")
         data = r.json()
-        if data.get("status") in ("connected", "qr_pending"):
+        if data.get("status") in ("connected", "qr_pending", "disconnected"):
             return True
     except Exception:
         pass
+
+    # Not responding at all — kill any stale processes on the port before starting fresh
+    _kill_stale_bridge()
 
     # Not running — try to start it
     server_js = BRIDGE_DIR / "server.js"
@@ -75,8 +104,8 @@ async def _ensure_bridge() -> bool:
         stderr=subprocess.DEVNULL,
     )
 
-    # Wait up to 8s for it to come up
-    for _ in range(16):
+    # Wait up to 10s for it to come up (needs time to connect to WhatsApp)
+    for _ in range(20):
         await asyncio.sleep(0.5)
         try:
             r = await _get_client().get("/status")
@@ -169,10 +198,10 @@ async def send_whatsapp(
             severity=Severity.LOW, recoverable=True))
 
     status = await _bridge_status()
-    if status.get("status") != "connected":
+    if status.get("status") not in ("connected", "disconnected"):
         return ToolResult(success=False, error=ToolError(
             code=ErrorCode.COMMAND_FAILED,
-            message=status.get("error", "WhatsApp not connected"),
+            message=status.get("error", "WhatsApp bridge not running"),
             severity=Severity.HIGH, recoverable=True))
 
     if not confirm:
@@ -225,10 +254,10 @@ async def read_whatsapp(
         limit: Number of messages to return (default 20).
     """
     status = await _bridge_status()
-    if status.get("status") != "connected":
+    if status.get("status") not in ("connected", "disconnected"):
         return ToolResult(success=False, error=ToolError(
             code=ErrorCode.COMMAND_FAILED,
-            message=status.get("error", "WhatsApp not connected"),
+            message=status.get("error", "WhatsApp bridge not running"),
             severity=Severity.HIGH, recoverable=True))
 
     try:
@@ -297,10 +326,10 @@ async def search_whatsapp(
         limit: Max results (default 20).
     """
     status = await _bridge_status()
-    if status.get("status") != "connected":
+    if status.get("status") not in ("connected", "disconnected"):
         return ToolResult(success=False, error=ToolError(
             code=ErrorCode.COMMAND_FAILED,
-            message=status.get("error", "WhatsApp not connected"),
+            message=status.get("error", "WhatsApp bridge not running"),
             severity=Severity.HIGH, recoverable=True))
 
     try:
