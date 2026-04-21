@@ -288,7 +288,8 @@ def doctor() -> int:
         "uv_tool": "uv tool", "pipx": "pipx", "pip_user": "pip --user",
         "dev": "source", "mac_app": "Mac app", "unknown": "?",
     }.get(method, method)
-    console.print(f"  [dim]friday-os {_installed_version()}  ·  via {method_label}  ·  `friday update` to refresh[/dim]")
+    tools_n, modules_n = _tool_inventory()
+    console.print(f"  [dim]friday-os {_installed_version()}  ·  via {method_label}  ·  {tools_n} tools across {modules_n} modules  ·  `friday update` to refresh[/dim]")
     console.print()
     t = Table(show_header=True, header_style="bold green", box=None, pad_edge=False,
               title="Integrations", title_style="dim", title_justify="left")
@@ -998,6 +999,35 @@ def _installed_version() -> str:
         return "unknown"
 
 
+def _tool_inventory() -> tuple[int, int]:
+    """Walk friday.tools and count every TOOL_SCHEMAS entry.
+
+    Returns (total_tools, module_count). Used by `friday doctor` so users can
+    see at a glance that their install brought every tool down.
+    """
+    import importlib, pkgutil
+    try:
+        import friday.tools as _tools_pkg
+    except Exception:
+        return (0, 0)
+
+    total = 0
+    modules = 0
+    for info in pkgutil.iter_modules(_tools_pkg.__path__):
+        name = info.name
+        if name.startswith("_") or name == "browser_tools_old":
+            continue
+        try:
+            m = importlib.import_module(f"friday.tools.{name}")
+        except Exception:
+            continue
+        schemas = getattr(m, "TOOL_SCHEMAS", None)
+        if isinstance(schemas, dict):
+            total += len(schemas)
+            modules += 1
+    return (total, modules)
+
+
 def _latest_git_sha() -> tuple[str, str]:
     """Fetch the short SHA + commit subject of origin/main. Never raises."""
     url = f"https://api.github.com/repos/{_GITHUB_REPO}/commits/main"
@@ -1083,17 +1113,21 @@ def update() -> int:
 
     method, detail = _detect_install_method()
     current = _installed_version()
+    tools_n, modules_n = _tool_inventory()
     sha, subject = _latest_git_sha()
 
     # Version panel
     t = Table(show_header=False, box=None, pad_edge=False)
     t.add_column(style="dim", no_wrap=True)
     t.add_column(overflow="fold")
-    t.add_row("installed",     f"friday-os {current}")
+    t.add_row("installed",      f"friday-os {current}  ({tools_n} tools, {modules_n} modules)")
     t.add_row("install method", detail)
     if sha:
         t.add_row("latest on main", f"{sha}  {subject}")
     console.print(t)
+    console.print()
+    console.print("  [dim]Update pulls the full tree — new files, new agents, new tools, new features,[/dim]")
+    console.print("  [dim]and updated dependencies.  It's not just a version bump.[/dim]")
     console.print()
 
     if method == "mac_app":
