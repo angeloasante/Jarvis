@@ -2,18 +2,12 @@
 
 All commands are subcommands of the `friday` CLI:
 
-    friday doctor              → audit every integration
-    friday setup openrouter    → pick a model, write to ~/.friday/.env
-    friday setup groq          → add a Groq API key
-    friday setup twilio        → SMS credentials + webhook instructions
-    friday setup gmail         → Google OAuth walkthrough + live auth
-    friday setup voice         → enable voice, check dependencies
-    friday setup gestures      → download MediaPipe model + enable
-    friday test llm            → make a cloud LLM call
-    friday test gmail          → list one email
-    friday test twilio         → send a test SMS to yourself
-    friday test tv             → try to reach an LG TV
-    friday heartbeat           → show how the heartbeat works + active watches
+    friday onboard             → full guided flow (QuickStart / Advanced)
+    friday doctor              → audit every integration + show version
+    friday update              → pull + install the latest release
+    friday setup <component>   → one-shot per-service wizard
+    friday test <component>    → connectivity test for a configured service
+    friday heartbeat           → explain background watches + list active ones
 
 Side note: every setup writes to ``~/.friday/.env`` so pip-installed users keep
 their keys outside the repo. ``friday/core/config.py`` already loads that file
@@ -287,6 +281,14 @@ def doctor() -> int:
     # Render config table
     console.print()
     console.print(Rule("FRIDAY · doctor", style="green"))
+    console.print()
+    # Version strip — quick glance at what's running
+    method, _detail = _detect_install_method()
+    method_label = {
+        "uv_tool": "uv tool", "pipx": "pipx", "pip_user": "pip --user",
+        "dev": "source", "mac_app": "Mac app", "unknown": "?",
+    }.get(method, method)
+    console.print(f"  [dim]friday-os {_installed_version()}  ·  via {method_label}  ·  `friday update` to refresh[/dim]")
     console.print()
     t = Table(show_header=True, header_style="bold green", box=None, pad_edge=False,
               title="Integrations", title_style="dim", title_justify="left")
@@ -979,6 +981,158 @@ def heartbeat() -> int:
 
 # ── CLI dispatch ─────────────────────────────────────────────────────────────
 
+# ── Update — detect how FRIDAY was installed, run the right upgrade ─────────
+#
+# The goal: a single `friday update` that works no matter how the user got
+# FRIDAY. We sniff `sys.executable`'s path to figure out which tool owns us,
+# then shell out to that tool's upgrade command.
+
+_GITHUB_REPO = "angeloasante/Jarvis"
+
+
+def _installed_version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("friday-os")
+    except Exception:
+        return "unknown"
+
+
+def _latest_git_sha() -> tuple[str, str]:
+    """Fetch the short SHA + commit subject of origin/main. Never raises."""
+    url = f"https://api.github.com/repos/{_GITHUB_REPO}/commits/main"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read())
+        return data["sha"][:10], (data.get("commit", {}).get("message", "") or "").splitlines()[0]
+    except Exception:
+        return "", ""
+
+
+def _detect_install_method() -> tuple[str, str]:
+    """Return (method, description). `method` is one of:
+
+        uv_tool   — installed via `uv tool install friday-os`
+        pipx      — installed via `pipx install friday-os`
+        pip_user  — installed via `pip install --user friday-os`
+        dev       — running from a source checkout (uv sync / pip install -e)
+        mac_app   — bundled Python inside Friday.app
+        unknown   — fall back to manual instructions
+    """
+    exe = Path(sys.executable).resolve()
+    exe_str = str(exe)
+
+    # Mac app bundles Python at .../Friday.app/Contents/Resources/python/bin/python3
+    if ".app/Contents/Resources/python" in exe_str:
+        return "mac_app", f"bundled inside Friday.app ({exe})"
+
+    # Dev install wins over every other detection: if the `friday` module is
+    # being imported from a directory that looks like a git repo with its
+    # own pyproject.toml naming friday-os, we're running from a checkout.
+    try:
+        import friday as _friday_mod
+        friday_path = Path(_friday_mod.__file__).resolve().parent
+        # walk up a couple levels looking for the repo root
+        for ancestor in [friday_path.parent, *friday_path.parents]:
+            if (ancestor / ".git").is_dir() and (ancestor / "pyproject.toml").is_file():
+                return "dev", f"source checkout at {ancestor}"
+    except Exception:
+        pass
+
+    # uv tool installs live at ~/.local/share/uv/tools/<name>/ or $UV_TOOL_DIR
+    uv_tool_dir = os.environ.get("UV_TOOL_DIR", str(Path.home() / ".local/share/uv/tools"))
+    if uv_tool_dir in exe_str or "/uv/tools/" in exe_str:
+        return "uv_tool", f"uv tool install friday-os  ({exe})"
+
+    # pipx venvs live at ~/.local/share/pipx/venvs/<name>/
+    if "/pipx/venvs/" in exe_str:
+        return "pipx", f"pipx install friday-os  ({exe})"
+
+    # Plain `pip install --user` → user-site packages dir
+    import site
+    user_base = Path(site.getuserbase()).resolve()
+    if str(user_base) in exe_str or "site-packages" in exe_str:
+        return "pip_user", f"pip install (python at {exe})"
+
+    return "unknown", f"python at {exe}"
+
+
+def _upgrade_cmd_for(method: str) -> list[str] | None:
+    """Command that, when run, reinstalls the latest FRIDAY for this method."""
+    if method == "uv_tool":
+        # --reinstall forces a fresh pull; handy when installed from git (no
+        # semver to compare, so `uv tool upgrade` alone is a no-op).
+        return ["uv", "tool", "install", "--force", "--reinstall",
+                f"friday-os @ git+https://github.com/{_GITHUB_REPO}"]
+    if method == "pipx":
+        return ["pipx", "reinstall", "friday-os"]
+    if method == "pip_user":
+        return [sys.executable, "-m", "pip", "install", "--user", "--upgrade",
+                f"friday-os @ git+https://github.com/{_GITHUB_REPO}"]
+    if method == "dev":
+        return ["bash", "-lc", "git pull && uv sync"]
+    return None  # mac_app / unknown handled separately
+
+
+def update() -> int:
+    """Update FRIDAY in place using whatever installer put it here."""
+    console.print()
+    console.print(Rule("FRIDAY · update", style="green"))
+    console.print()
+
+    method, detail = _detect_install_method()
+    current = _installed_version()
+    sha, subject = _latest_git_sha()
+
+    # Version panel
+    t = Table(show_header=False, box=None, pad_edge=False)
+    t.add_column(style="dim", no_wrap=True)
+    t.add_column(overflow="fold")
+    t.add_row("installed",     f"friday-os {current}")
+    t.add_row("install method", detail)
+    if sha:
+        t.add_row("latest on main", f"{sha}  {subject}")
+    console.print(t)
+    console.print()
+
+    if method == "mac_app":
+        console.print("  You're running the bundled Mac app. To update, download the")
+        console.print(f"  latest [cyan]Friday.dmg[/cyan] from:")
+        console.print(f"    [cyan]https://github.com/{_GITHUB_REPO}/releases/latest[/cyan]")
+        console.print("  Drag it to Applications (replacing the old one). Nothing in")
+        console.print("  ~/Friday/ or ~/.friday/ is touched — your config survives.")
+        return 0
+
+    cmd = _upgrade_cmd_for(method)
+    if not cmd:
+        console.print(f"  [yellow]Couldn't auto-detect how FRIDAY is installed.[/yellow]")
+        console.print("  Manual options (pick the one that matches how you installed):")
+        console.print(f"    [cyan]uv tool install --force --reinstall 'friday-os @ git+https://github.com/{_GITHUB_REPO}'[/cyan]")
+        console.print(f"    [cyan]pipx reinstall friday-os[/cyan]")
+        console.print(f"    [cyan]pip install --user --upgrade 'friday-os @ git+https://github.com/{_GITHUB_REPO}'[/cyan]")
+        return 1
+
+    # Show command, confirm, exec
+    pretty = " ".join(cmd) if not (cmd[0] == "bash" and len(cmd) > 2) else cmd[-1]
+    console.print(f"  Running: [cyan]{pretty}[/cyan]")
+    console.print()
+    if not _confirm("Proceed?", default=True):
+        return 0
+
+    rc = subprocess.call(cmd)
+    console.print()
+    if rc == 0:
+        new_version = _installed_version()  # won't pick up new version in THIS process
+        console.print(f"  [green]✓ Updated.[/green]  Restart FRIDAY to pick up the new code.")
+        if new_version != current:
+            console.print(f"  [dim]{current} → {new_version}[/dim]")
+    else:
+        console.print(f"  [red]Update failed (exit {rc}).[/red]")
+    console.print()
+    return rc
+
+
 _SETUP_COMMANDS: dict[str, Callable[[], int]] = {
     "deps":       setup_deps,
     "openrouter": setup_openrouter,
@@ -1011,6 +1165,9 @@ def maybe_handle_admin_command(argv: list[str]) -> int | None:
 
     if cmd == "onboard":
         return onboard()
+
+    if cmd == "update":
+        return update()
 
     if cmd == "heartbeat":
         return heartbeat()

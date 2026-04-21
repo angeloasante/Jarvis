@@ -114,7 +114,11 @@ friday onboard
 friday
 ```
 
-Any of these put the `friday` command on your PATH. `friday onboard` is the one-stop wizard — it asks **QuickStart vs Advanced** up front, then walks through:
+Any of these put the `friday` command on your PATH.
+
+**Updating later** — once FRIDAY is installed, just run **`friday update`** to pull the latest code. It detects which installer you used (pip, pipx, uv tool, source, or the Mac app) and runs the right upgrade command under the hood. You can also re-run the curl one-liner; it's idempotent.
+
+`friday onboard` is the one-stop wizard — it asks **QuickStart vs Advanced** up front, then walks through:
 
 1. **Profile** — name, bio, tone → `~/Friday/user.json`
 2. **System deps** — detects Python/`uv`/`ollama`/`node`/`ngrok`/`brew`, offers to brew-install anything missing
@@ -1172,7 +1176,8 @@ Without the vision model, FRIDAY can still read all text on screen (OCR) and ans
 | `friday` | Launch the REPL (runs `friday init` on first run) |
 | `friday onboard` | Full guided setup — QuickStart or Advanced |
 | `friday init` | Interactive profile wizard (name, bio, tone → `user.json`) |
-| `friday doctor` | Audit every integration + system dependency |
+| `friday doctor` | Audit every integration + system dependency (shows version) |
+| `friday update` | Detects how FRIDAY was installed and runs the right upgrade |
 | `friday config [show\|edit\|path\|open]` | Inspect / edit `~/Friday/user.json` |
 | `friday setup deps` | Detect and brew-install missing system tools |
 | `friday setup openrouter` | Paste key, optionally pick a model from the live catalogue |

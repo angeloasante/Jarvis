@@ -112,6 +112,61 @@ def _ask(prompt: str, default: str = "") -> str:
     return ans or default
 
 
+# Minimal ISO-3166-1 alpha-2 map — enough to catch what users actually type.
+# (Full list is ~250 codes; the common confusions are names / phone codes.)
+_COUNTRY_NAME_TO_ISO = {
+    "united kingdom": "GB", "uk": "GB", "britain": "GB", "england": "GB", "scotland": "GB", "wales": "GB",
+    "united states": "US", "usa": "US", "america": "US",
+    "canada": "CA", "ghana": "GH", "nigeria": "NG", "south africa": "ZA",
+    "kenya": "KE", "germany": "DE", "france": "FR", "spain": "ES", "italy": "IT",
+    "portugal": "PT", "netherlands": "NL", "ireland": "IE", "australia": "AU",
+    "new zealand": "NZ", "japan": "JP", "china": "CN", "india": "IN",
+    "brazil": "BR", "mexico": "MX", "argentina": "AR",
+}
+# Phone dialling codes → ISO — catches "44", "+44", "+1", etc.
+_PHONE_TO_ISO = {
+    "1": "US", "44": "GB", "233": "GH", "234": "NG", "27": "ZA", "254": "KE",
+    "49": "DE", "33": "FR", "34": "ES", "39": "IT", "351": "PT", "31": "NL",
+    "353": "IE", "61": "AU", "64": "NZ", "81": "JP", "86": "CN", "91": "IN",
+    "55": "BR", "52": "MX", "54": "AR",
+}
+
+
+def _normalise_country_code(raw: str) -> str | None:
+    """Turn 'uk' / 'United Kingdom' / '+44' / 'GB' → 'GB'. None if unrecognised."""
+    s = raw.strip().lower().replace("+", "")
+    if not s:
+        return None
+    # Name/alias match FIRST so 'uk' resolves to 'GB' (the real ISO code)
+    # rather than the literal string 'UK', which isn't an ISO-3166-1 alpha-2.
+    if s in _COUNTRY_NAME_TO_ISO:
+        return _COUNTRY_NAME_TO_ISO[s]
+    # Phone dialling code
+    if s.isdigit() and s in _PHONE_TO_ISO:
+        return _PHONE_TO_ISO[s]
+    # Already a 2-letter ISO code? Accept it verbatim (uppercased).
+    if len(s) == 2 and s.isalpha():
+        return s.upper()
+    return None
+
+
+def _ask_country_code(default: str) -> str:
+    """Prompt for country_code, auto-correct common mistakes, re-prompt once if invalid."""
+    while True:
+        raw = _ask("Country code (ISO 2-letter, e.g. GB, US, NG)", default)
+        if not raw:
+            return default
+        normalised = _normalise_country_code(raw)
+        if normalised:
+            if normalised.lower() != raw.lower():
+                console.print(f"  [dim]↳ interpreted as '{normalised}'[/dim]")
+            return normalised
+        console.print(
+            f"  [yellow]'{raw}' isn't an ISO-3166 code.[/yellow] "
+            "Use a 2-letter code (GB, US, NG, IN…). Press Enter to keep the default."
+        )
+
+
 def run_onboarding() -> UserConfig:
     """Interactive wizard. Writes ~/Friday/user.json and returns the config."""
     ensure_friday_dir()
@@ -129,7 +184,7 @@ def run_onboarding() -> UserConfig:
     name         = _ask("Your first name (how FRIDAY should address you)", existing.name)
     bio          = _ask("One-line bio (e.g. 'ML engineer, Lagos')", existing.bio)
     location     = _ask("Location (City, Country)", existing.location)
-    country_code = _ask("Country code (ISO 2-letter, for web-search region)", existing.country_code or "US")
+    country_code = _ask_country_code(existing.country_code or "US")
     email        = _ask("Email (for SMS-to-self + signatures)", existing.email)
     phone        = _ask("Phone (E.164, e.g. +447555834656)", existing.phone)
     github       = _ask("GitHub username (optional)", existing.github)
