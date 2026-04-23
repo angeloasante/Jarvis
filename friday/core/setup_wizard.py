@@ -1384,13 +1384,27 @@ def _detect_install_method() -> tuple[str, str]:
     except Exception:
         pass
 
-    # uv tool installs live at ~/.local/share/uv/tools/<name>/ or $UV_TOOL_DIR
+    # uv tool installs live at ~/.local/share/uv/tools/<name>/ or $UV_TOOL_DIR.
+    # Critical: `uv tool install` symlinks the venv's python to UV's shared
+    # interpreter at ~/.local/share/uv/python/, so sys.executable does NOT
+    # contain /uv/tools/. We have to check the entry-point script instead —
+    # sys.argv[0] stays pointing at .../uv/tools/<name>/bin/<script>.
     uv_tool_dir = os.environ.get("UV_TOOL_DIR", str(Path.home() / ".local/share/uv/tools"))
-    if uv_tool_dir in exe_str or "/uv/tools/" in exe_str:
-        return "uv_tool", f"uv tool install friday-os  ({exe})"
+    try:
+        argv0 = Path(sys.argv[0]).resolve() if sys.argv and sys.argv[0] else exe
+        argv0_str = str(argv0)
+    except Exception:
+        argv0_str = ""
+    if (
+        uv_tool_dir in exe_str
+        or "/uv/tools/" in exe_str
+        or uv_tool_dir in argv0_str
+        or "/uv/tools/" in argv0_str
+    ):
+        return "uv_tool", f"uv tool install friday-os  ({argv0_str or exe})"
 
     # pipx venvs live at ~/.local/share/pipx/venvs/<name>/
-    if "/pipx/venvs/" in exe_str:
+    if "/pipx/venvs/" in exe_str or "/pipx/venvs/" in argv0_str:
         return "pipx", f"pipx install friday-os  ({exe})"
 
     # Plain `pip install --user` → user-site packages dir
@@ -1412,6 +1426,14 @@ def _upgrade_cmd_for(method: str) -> list[str] | None:
     if method == "pipx":
         return ["pipx", "reinstall", "friday-os"]
     if method == "pip_user":
+        # Some managed environments (UV's shared interpreter, Python built
+        # from source without ensurepip) don't ship pip. If pip is missing,
+        # defer to uv tool install instead — that's the most common route
+        # for interpreter-managed installs on modern macOS.
+        import importlib.util as _iu
+        if _iu.find_spec("pip") is None:
+            return ["uv", "tool", "install", "--force", "--reinstall",
+                    f"friday-os @ git+https://github.com/{_GITHUB_REPO}"]
         return [sys.executable, "-m", "pip", "install", "--user", "--upgrade",
                 f"friday-os @ git+https://github.com/{_GITHUB_REPO}"]
     if method == "dev":
