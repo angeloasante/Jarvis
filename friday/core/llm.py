@@ -3,7 +3,10 @@
 import json
 import ollama
 from typing import Optional
-from friday.core.config import MODEL_NAME, USE_CLOUD, CLOUD_API_KEY, CLOUD_BASE_URL, CLOUD_MODEL_NAME
+from friday.core.config import (
+    MODEL_NAME, USE_CLOUD, CLOUD_API_KEY, CLOUD_BASE_URL, CLOUD_MODEL_NAME,
+    CLOUD_FALLBACK_CHAIN,
+)
 
 
 # ── Local Ollama ──────────────────────────────────────────────────────────────
@@ -79,12 +82,27 @@ _cloud_client = None
 
 
 def _get_cloud_client():
-    """Lazy-init the OpenAI client for cloud LLM."""
+    """Lazy-init the OpenAI client for cloud LLM (primary provider only)."""
     global _cloud_client
     if _cloud_client is None and CLOUD_API_KEY:
         from openai import OpenAI
         _cloud_client = OpenAI(base_url=CLOUD_BASE_URL, api_key=CLOUD_API_KEY)
     return _cloud_client
+
+
+# Cache of per-provider OpenAI clients used by the fallback chain.
+_provider_clients: dict[str, object] = {}
+
+
+def _client_for(base_url: str, api_key: str):
+    """Return a cached OpenAI client for an arbitrary (base_url, api_key) pair."""
+    key = f"{base_url}|{api_key[:8]}"
+    client = _provider_clients.get(key)
+    if client is None:
+        from openai import OpenAI
+        client = OpenAI(base_url=base_url, api_key=api_key)
+        _provider_clients[key] = client
+    return client
 
 
 def _normalize_openai_response(response) -> dict:
@@ -124,6 +142,93 @@ def _normalize_openai_response(response) -> dict:
     return result
 
 
+def _sanitize_messages(messages: list[dict]) -> list[dict]:
+    """OpenAI expects tool_call args as JSON strings; our format stores dicts."""
+    out = []
+    for msg in messages:
+        if msg.get("tool_calls"):
+            fixed_tcs = []
+            for tc in msg["tool_calls"]:
+                if "function" not in tc:
+                    fixed_tcs.append(tc)
+                    continue
+                args = tc["function"].get("arguments", {})
+                fixed_tcs.append({
+                    "id": tc.get("id", f"call_{id(tc)}"),
+                    "type": "function",
+                    "function": {
+                        **tc["function"],
+                        "arguments": json.dumps(args) if isinstance(args, dict) else (args or "{}"),
+                    },
+                })
+            msg = {**msg, "tool_calls": fixed_tcs}
+        out.append(msg)
+    return out
+
+
+def _wrap_tools(tools: Optional[list[dict]]) -> Optional[list[dict]]:
+    if not tools:
+        return None
+    wrapped = []
+    for t in tools:
+        if t.get("type") == "function" and "function" in t:
+            wrapped.append(t)
+        else:
+            wrapped.append({"type": "function", "function": t})
+    return wrapped
+
+
+def _call_one_provider(
+    client, model: str,
+    messages: list[dict],
+    tools: Optional[list[dict]],
+    stream: bool,
+    max_tokens: int | None,
+):
+    """Make a single cloud call against one provider. Raises on failure."""
+    sanitized = _sanitize_messages(messages)
+
+    # Qwen3 on Groq needs /no_think to suppress its reasoning chain.
+    # Gemma doesn't, neither do the other providers we support.
+    _m = model.lower()
+    if "qwen" in _m and "gemma" not in _m:
+        if sanitized and sanitized[0]["role"] == "system":
+            sanitized = [{**sanitized[0], "content": "/no_think\n" + sanitized[0]["content"]}] + sanitized[1:]
+        else:
+            sanitized = [{"role": "system", "content": "/no_think"}] + sanitized
+
+    kwargs: dict = {"model": model, "messages": sanitized}
+    if tools:
+        kwargs["tools"] = _wrap_tools(tools)
+    if max_tokens:
+        kwargs["max_tokens"] = max_tokens
+    if stream:
+        kwargs["stream"] = True
+
+    response = client.chat.completions.create(**kwargs)
+
+    if stream:
+        return _filtered_stream(response)
+
+    result = _normalize_openai_response(response)
+    content = result.get("message", {}).get("content", "")
+    if "<think>" in content:
+        result["message"]["content"] = strip_thinking(content)
+    return result
+
+
+def _is_retriable(exc: BaseException) -> bool:
+    """Return True for errors worth cascading to the next provider.
+
+    Covers: HTTP 4xx/5xx from upstream, network errors, OpenAI SDK errors
+    that indicate the provider is unhappy (rate limit, not found, auth).
+    """
+    name = exc.__class__.__name__
+    # Treat absolutely every exception except KeyboardInterrupt as retriable —
+    # we'd rather try the next provider than hard-fail the user's request.
+    return not isinstance(exc, (KeyboardInterrupt, SystemExit))
+
+
 def cloud_chat(
     messages: list[dict],
     tools: Optional[list[dict]] = None,
@@ -131,91 +236,64 @@ def cloud_chat(
     max_tokens: int | None = None,
     model: str | None = None,
 ):
-    """LLM call via cloud API. Falls back to local Ollama if unavailable.
+    """LLM call with runtime provider fallback.
 
-    Uses OpenAI-compatible endpoint (Groq, Fireworks, Together, Modal, etc.).
-    Tool schemas are automatically wrapped in OpenAI format.
-    Response is normalized to match Ollama's dict format.
+    Chain (configured in ``friday.core.config``):
+      1. Primary provider (Gemma via OpenRouter → Google AI Studio → Groq,
+         whichever is configured first and has a key).
+      2. Every other configured provider, in priority order. On any error
+         (HTTP 4xx/5xx, network timeout, rate-limit, model-not-found) the
+         next provider in the chain gets the request.
+      3. If every cloud provider fails, drop to local Ollama (which always
+         works if ``ollama serve`` is running).
+
+    The first successful response wins and returns. We log which provider
+    answered so ``friday doctor`` / debug output reflects reality.
     """
-    client = _get_cloud_client()
-    if not client:
-        # No cloud configured — fall back to local
+    import logging
+    log = logging.getLogger(__name__)
+
+    # Primary: what config.py resolved at startup
+    primary = _get_cloud_client()
+    primary_attempts: list[tuple[object, str, str]] = []  # (client, model, label)
+    if primary and CLOUD_API_KEY:
+        primary_attempts.append(
+            (primary, model or CLOUD_MODEL_NAME, f"primary ({CLOUD_BASE_URL})")
+        )
+
+    # Fallback chain: every OTHER configured provider, in priority order
+    for name, key, base_url, default_model in CLOUD_FALLBACK_CHAIN:
+        client = _client_for(base_url, key)
+        primary_attempts.append((client, default_model, name))
+
+    if not primary_attempts:
+        # No cloud providers configured at all — straight to local Ollama.
         return chat(messages=messages, tools=tools, stream=stream,
                     max_tokens=max_tokens, think=False)
 
-    try:
-        # Sanitize messages — OpenAI API requires tool_calls arguments as JSON strings
-        # with id and type fields, but our normalized responses store args as dicts.
-        sanitized_messages = []
-        for msg in messages:
-            if msg.get("tool_calls"):
-                fixed_tcs = []
-                for tc in msg["tool_calls"]:
-                    if "function" not in tc:
-                        fixed_tcs.append(tc)
-                        continue
-                    args = tc["function"].get("arguments", {})
-                    fixed_tcs.append({
-                        "id": tc.get("id", f"call_{id(tc)}"),
-                        "type": "function",
-                        "function": {
-                            **tc["function"],
-                            "arguments": json.dumps(args) if isinstance(args, dict) else (args or "{}"),
-                        },
-                    })
-                msg = {**msg, "tool_calls": fixed_tcs}
-            sanitized_messages.append(msg)
+    last_error: BaseException | None = None
+    for client, mdl, label in primary_attempts:
+        try:
+            result = _call_one_provider(
+                client, mdl, messages, tools, stream, max_tokens,
+            )
+            if label != primary_attempts[0][2]:
+                # We used a fallback — note it. Useful for doctor/debug.
+                log.info("cloud_chat answered via fallback provider: %s", label)
+            return result
+        except Exception as e:
+            if not _is_retriable(e):
+                raise
+            last_error = e
+            log.warning("cloud_chat provider '%s' failed (%s: %s) — trying next",
+                        label, type(e).__name__, str(e)[:140])
+            continue
 
-        kwargs = {
-            "model": model or CLOUD_MODEL_NAME,
-            "messages": sanitized_messages,
-        }
-
-        if tools:
-            # Wrap in OpenAI format if not already wrapped
-            wrapped = []
-            for t in tools:
-                if t.get("type") == "function" and "function" in t:
-                    wrapped.append(t)  # Already in OpenAI format
-                else:
-                    wrapped.append({"type": "function", "function": t})
-            kwargs["tools"] = wrapped
-
-        if max_tokens:
-            kwargs["max_tokens"] = max_tokens
-
-        if stream:
-            kwargs["stream"] = True
-
-        # Model-specific thinking suppression
-        _model = (model or CLOUD_MODEL_NAME).lower()
-        if "qwen" in _model:
-            # Qwen 3 needs explicit /no_think token to suppress reasoning
-            if kwargs["messages"] and kwargs["messages"][0]["role"] == "system":
-                kwargs["messages"][0]["content"] = "/no_think\n" + kwargs["messages"][0]["content"]
-            else:
-                kwargs["messages"].insert(0, {"role": "system", "content": "/no_think"})
-        # Gemma 4 and most other models don't need thinking suppression
-
-        response = client.chat.completions.create(**kwargs)
-
-        if stream:
-            # Wrap stream to filter out <think> blocks
-            return _filtered_stream(response)
-
-        result = _normalize_openai_response(response)
-        # Strip any thinking blocks from non-streamed response
-        content = result.get("message", {}).get("content", "")
-        if "<think>" in content:
-            result["message"]["content"] = strip_thinking(content)
-        return result
-
-    except Exception as e:
-        # Cloud failed — fall back to local Ollama
-        import logging
-        logging.getLogger(__name__).warning(f"Cloud LLM failed ({type(e).__name__}: {e}), falling back to local")
-        return chat(messages=messages, tools=tools, stream=stream,
-                    max_tokens=max_tokens, think=False)
+    # Every cloud provider failed — drop to local Ollama as final fallback.
+    log.warning("All cloud providers failed (last: %s) — falling back to local Ollama",
+                last_error.__class__.__name__ if last_error else "unknown")
+    return chat(messages=messages, tools=tools, stream=stream,
+                max_tokens=max_tokens, think=False)
 
 
 # ── Shared extraction helpers ─────────────────────────────────────────────────
