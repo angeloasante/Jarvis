@@ -53,6 +53,7 @@ dependencies = [
     "twilio>=9.10.4",
     "pyobjc-framework-quartz>=10.0",
     "fal-client>=0.13.2",
+    "ddgs>=9.14.1",
 ]
 
 [project.scripts]

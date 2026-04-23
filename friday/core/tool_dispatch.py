@@ -82,6 +82,9 @@ TOOL_NAMES = [
     "read_whatsapp", "send_whatsapp", "search_whatsapp", "whatsapp_status",
     # SMS
     "send_sms", "read_sms",
+    # Telegram (second channel — rich media since UK SMS can't carry MMS)
+    "send_telegram_message", "send_telegram_photo", "send_telegram_audio",
+    "send_telegram_voice", "send_telegram_document", "send_telegram_video",
     # Social
     "search_x", "get_my_mentions",
     # Information
@@ -138,8 +141,14 @@ def _build_tools():
     except Exception:
         sms = {}
 
+    # Telegram — optional (rich media fallback when SMS can't carry MMS)
+    try:
+        from friday.tools.telegram_tools import TOOL_SCHEMAS as tg
+    except Exception:
+        tg = {}
+
     all_schemas = {}
-    for src in [email, cal, calls, web, x, mac, mem, files, brief, imsg, cron, watch, screen, cast, wa, sms]:
+    for src in [email, cal, calls, web, x, mac, mem, files, brief, imsg, cron, watch, screen, cast, wa, sms, tg]:
         all_schemas.update(src)
 
     DIRECT_TOOLS.update({n: all_schemas[n] for n in TOOL_NAMES if n in all_schemas})

@@ -172,18 +172,44 @@ async def main():
         except Exception as e:
             console.print(f"  [red]✗ SMS server failed: {e}[/red]")
 
-    # ngrok — expose SMS webhook on static domain
-    ngrok_domain = os.environ.get("NGROK_DOMAIN", "")
-    if ngrok_domain and os.environ.get("TWILIO_ACCOUNT_SID"):
+    # Telegram bot — second channel for rich media (long-polling, no tunnel)
+    if os.environ.get("TELEGRAM_BOT_TOKEN", "").strip():
         try:
-            import subprocess
-            subprocess.run(["pkill", "-f", "ngrok http"], capture_output=True, timeout=3)
-            import time as _time; _time.sleep(1)
-            subprocess.Popen(
-                ["ngrok", "http", "3200", "--domain", ngrok_domain],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            console.print(f"  [bold green]:: SMS webhook ACTIVE — https://{ngrok_domain}/sms[/bold green]")
+            from friday.telegram import start_bot as start_telegram
+            tg_loop = asyncio.get_event_loop()
+            tg_bot = start_telegram(friday=friday, loop=tg_loop)
+            if tg_bot:
+                console.print("  [bold green]:: Telegram bot ACTIVE[/bold green]")
+        except Exception as e:
+            console.print(f"  [red]✗ Telegram bot failed: {e}[/red]")
+
+    # Inbound SMS tunnel — started by `friday setup twilio`. Three possible
+    # configs, in priority order: static ngrok domain > ephemeral ngrok URL
+    # saved from the wizard > tailscale funnel URL. The wizard auto-
+    # configures Twilio to point at whichever we end up with.
+    ngrok_domain   = os.environ.get("NGROK_DOMAIN", "").strip()
+    ngrok_ephemeral = os.environ.get("NGROK_PUBLIC_URL", "").strip()
+    ts_funnel_url  = os.environ.get("TAILSCALE_FUNNEL_URL", "").strip()
+    sms_port       = os.environ.get("SMS_PORT", "3200")
+
+    if os.environ.get("TWILIO_ACCOUNT_SID"):
+        try:
+            import subprocess, time as _time
+            if ngrok_domain:
+                subprocess.run(["pkill", "-f", "ngrok http"], capture_output=True, timeout=3)
+                _time.sleep(1)
+                subprocess.Popen(
+                    ["ngrok", "http", sms_port, "--domain", ngrok_domain],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                console.print(f"  [bold green]:: SMS webhook ACTIVE — https://{ngrok_domain}/sms[/bold green]")
+            elif ngrok_ephemeral:
+                # Ephemeral URLs change every ngrok restart — warn the user.
+                console.print(f"  [yellow]:: Ephemeral ngrok URL saved ({ngrok_ephemeral}).[/yellow] "
+                              f"Restart ngrok manually if SMS stops: [dim]ngrok http {sms_port}[/dim]")
+            elif ts_funnel_url:
+                # Tailscale funnel persists across reboots when backgrounded.
+                console.print(f"  [bold green]:: SMS webhook ACTIVE — {ts_funnel_url}/sms[/bold green] (Tailscale Funnel)")
         except Exception:
             pass
 
@@ -228,6 +254,10 @@ async def main():
             console.print()
             console.print("  [bold green]Background[/bold green]")
             console.print("  [green]/clearwatches[/green]      Kill all active watch tasks")
+            console.print()
+            console.print("  [bold green]Messaging channels[/bold green]")
+            console.print("  [green]/telegram[/green]          Show Telegram bot status + chat_id")
+            console.print("  [green]/sms[/green]               Show SMS webhook status + Twilio tunnel")
             console.print()
             console.print("  [bold green]Agent Override[/bold green]")
             console.print("  [green]@comms[/green]             Force route to comms agent")
@@ -308,6 +338,39 @@ async def main():
                 console.print("  [dim green]:: Gestures already ON[/dim green]\n")
             else:
                 console.print("  [dim green]:: Gestures already OFF[/dim green]\n")
+            continue
+
+        if user_input == "/telegram":
+            tok = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+            allowed = os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "").strip()
+            if not tok:
+                console.print("  [dim]:: Telegram not configured. Run:[/dim] "
+                              "[cyan]friday setup telegram[/cyan]\n")
+            else:
+                try:
+                    from friday.telegram.bot import _call
+                    me = _call("getMe", timeout=5)
+                    username = me["result"].get("username", "?") if me.get("ok") else "?"
+                    status = "ACTIVE" if me.get("ok") else "DOWN"
+                    console.print(f"  [dim green]:: Telegram {status}[/dim green] — bot @{username}")
+                    console.print(f"  [dim]allowed chats: {allowed or 'OPEN (no lock)'}[/dim]\n")
+                except Exception as e:
+                    console.print(f"  [red]:: Telegram check failed: {e}[/red]\n")
+            continue
+
+        if user_input == "/sms":
+            sid = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
+            phone = os.environ.get("TWILIO_PHONE_NUMBER", "").strip()
+            domain = os.environ.get("NGROK_DOMAIN", "").strip()
+            ephemeral = os.environ.get("NGROK_PUBLIC_URL", "").strip()
+            ts_url = os.environ.get("TAILSCALE_FUNNEL_URL", "").strip()
+            if not sid:
+                console.print("  [dim]:: SMS not configured. Run:[/dim] "
+                              "[cyan]friday setup twilio[/cyan]\n")
+            else:
+                url = (f"https://{domain}" if domain else ephemeral or ts_url or "(no tunnel)")
+                console.print(f"  [dim green]:: SMS ACTIVE[/dim green] — {phone}")
+                console.print(f"  [dim]webhook: {url}/sms[/dim]\n")
             continue
 
         if user_input == "/clearwatches":

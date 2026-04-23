@@ -34,9 +34,11 @@ from friday.core.user_config import USER, FRIDAY_DIR as PROFILE_DIR, CONFIG_PATH
 
 console = Console()
 
-RUNTIME_DIR = Path.home() / ".friday"       # Hidden — runtime data, OAuth, models
-ENV_PATH = RUNTIME_DIR / ".env"             # Where setup wizards write keys
-GOOGLE_TOKEN = RUNTIME_DIR / "google_token.json"   # Per-user OAuth token cache
+RUNTIME_DIR  = Path.home() / ".friday"      # Hidden — runtime OAuth tokens, DB, models
+PROFILE_ENV  = Path.home() / "Friday" / ".env"   # Visible — user-facing API keys
+LEGACY_ENV   = RUNTIME_DIR / ".env"          # Pre-migration location; we still read it
+ENV_PATH     = PROFILE_ENV                   # Where new writes go
+GOOGLE_TOKEN = RUNTIME_DIR / "google_token.json"   # OAuth token cache stays in runtime dir
 MODELS_DIR = RUNTIME_DIR / "models"
 GESTURE_TASK = MODELS_DIR / "gesture_recognizer.task"
 GESTURE_TASK_URL = (
@@ -90,9 +92,9 @@ def _system_deps() -> list[tuple[str, str, bool, str, str]]:
 # ── .env helpers ─────────────────────────────────────────────────────────────
 
 def _read_env() -> dict[str, str]:
-    """Parse ~/.friday/.env (falls back to repo-local .env for dev installs)."""
+    """Union of ~/Friday/.env + ~/.friday/.env + repo-local .env (first-write-wins)."""
     env: dict[str, str] = {}
-    for path in (ENV_PATH, Path.cwd() / ".env"):
+    for path in (PROFILE_ENV, LEGACY_ENV, Path.cwd() / ".env"):
         if not path.exists():
             continue
         for line in path.read_text().splitlines():
@@ -105,8 +107,8 @@ def _read_env() -> dict[str, str]:
 
 
 def _write_env_updates(updates: dict[str, str]) -> None:
-    """Write/merge keys into ~/.friday/.env. Comments + unrelated keys preserved."""
-    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    """Write/merge keys into ~/Friday/.env. Comments + unrelated keys preserved."""
+    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
     existing_lines: list[str] = []
     existing_keys: dict[str, int] = {}   # key → line index
 
@@ -233,6 +235,13 @@ def doctor() -> int:
     rows.append(_check(
         "Twilio (SMS in/out)", has_twilio,
         "configured" if has_twilio else "run `friday setup twilio`"
+    ))
+
+    # Telegram (second channel, rich media)
+    has_tg = bool((env.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")).strip())
+    rows.append(_check(
+        "Telegram (rich media)", has_tg,
+        "configured" if has_tg else "optional — run `friday setup telegram`"
     ))
 
     # X / Twitter
@@ -630,6 +639,45 @@ def setup_groq() -> int:
     )
 
 
+def setup_gemma() -> int:
+    """Google AI Studio — free Gemma 4 access straight from Google.
+
+    This is a DIFFERENT key from the Gmail OAuth one. Gemma keys come from
+    Google AI Studio (aistudio.google.com/app/apikey), not Google Cloud Console.
+    Free tier is generous: 14,400 requests/day, 4M tokens/minute.
+    """
+    console.print()
+    console.print(Rule("Google AI Studio — Gemma 4 free tier", style="green"))
+    console.print()
+    console.print("  Google's direct Gemma API. Free tier: 14,400 requests/day.")
+    console.print(f"  Grab a key: {_link('https://aistudio.google.com/app/apikey')}")
+    console.print()
+    console.print("  [bold yellow]Note:[/bold yellow] this is NOT the same as your Gmail OAuth setup.")
+    console.print("  Gmail uses a Cloud Console OAuth client; Gemma uses an AI Studio key.")
+    console.print()
+
+    env = _read_env()
+    current = env.get("GOOGLE_AI_STUDIO_KEY", "") or env.get("GEMINI_API_KEY", "")
+    if current:
+        console.print(f"  [dim]Already set.[/dim]")
+        if not _confirm("Replace?", default=False):
+            return 0
+
+    key = _ask("Paste your AI Studio key (AIza…)", secret=True)
+    if not key:
+        console.print("  [yellow]Skipped.[/yellow]")
+        return 0
+    if not key.startswith("AIza"):
+        console.print("  [red]That doesn't look like an AI Studio key (expected 'AIza…' prefix).[/red]")
+        if not _confirm("Save anyway?", default=False):
+            return 2
+
+    _write_env_updates({"GOOGLE_AI_STUDIO_KEY": key})
+    console.print(f"  [green]✓ Saved[/green] → {ENV_PATH}")
+    console.print("  This becomes a fallback in the cloud chain: OpenRouter → Google AI → Groq → Ollama.")
+    return 0
+
+
 def setup_tavily() -> int:
     return _simple_key_setup(
         service="Tavily",
@@ -698,7 +746,12 @@ def setup_x() -> int:
 # ── Twilio ───────────────────────────────────────────────────────────────────
 
 def setup_twilio() -> int:
-    """Three fields from the Twilio console, plus your own number."""
+    """Three fields from the Twilio console, plus your own number.
+
+    After saving creds, detects ngrok/tailscale, opens a tunnel on the SMS
+    port (3200), and auto-configures the Twilio number's inbound webhook
+    so there's no manual 'paste the URL into the Twilio console' step.
+    """
     console.print()
     console.print(Rule("Twilio (SMS)", style="green"))
     console.print()
@@ -722,15 +775,276 @@ def setup_twilio() -> int:
         "TWILIO_PHONE_NUMBER": phone,
         "CONTACT_PHONE": contact,
     }
-    ngrok_domain = _ask("NGROK_DOMAIN (for inbound webhook — blank to skip)",
-                        default=env.get("NGROK_DOMAIN", ""))
-    if ngrok_domain:
-        updates["NGROK_DOMAIN"] = ngrok_domain
+    _write_env_updates(updates)
+    console.print(f"  [green]✓ Saved[/green] → {ENV_PATH}")
+
+    # ── Tunnel: ngrok > tailscale > skip ─────────────────────────────────
+    console.print()
+    console.print("  [bold]Inbound webhook[/bold] — Twilio needs a public HTTPS URL to send SMS to.")
+    public_url = _setup_twilio_tunnel(env)
+    if not public_url:
+        console.print("  [yellow]Skipped tunnel.[/yellow] Inbound SMS won't work until a tunnel is configured.")
+        console.print("  Install ngrok ([dim]brew install ngrok[/dim]) or tailscale, then re-run `friday setup twilio`.")
+        return 0
+
+    # ── Auto-configure Twilio number's webhook via API ───────────────────
+    webhook_url = f"{public_url.rstrip('/')}/sms"
+    if _update_twilio_webhook(sid, token, phone, webhook_url):
+        console.print(f"  [green]✓ Twilio webhook auto-configured[/green] → [cyan]{webhook_url}[/cyan]")
+    else:
+        console.print(f"  [yellow]Couldn't auto-configure Twilio.[/yellow] Manually set the SMS webhook to:")
+        console.print(f"    [cyan]{webhook_url}[/cyan] (POST)")
+        console.print(f"  Phone number settings: {_link('https://console.twilio.com/us1/develop/phone-numbers/manage/incoming')}")
+    return 0
+
+
+def _setup_twilio_tunnel(env: dict[str, str]) -> str | None:
+    """Start ngrok or tailscale funnel on port 3200 and return the public URL.
+
+    Returns None if no tunnel tool is available or the user opts out.
+    """
+    sms_port = env.get("SMS_PORT") or os.getenv("SMS_PORT", "3200")
+    has_ngrok = bool(_which("ngrok"))
+    has_ts = bool(_which("tailscale"))
+
+    if not has_ngrok and not has_ts:
+        console.print("  [dim]Neither ngrok nor tailscale found.[/dim]")
+        console.print("  Install one:")
+        console.print("    • ngrok:      [cyan]brew install ngrok[/cyan] (free, quickest)")
+        console.print("    • tailscale:  [cyan]brew install --cask tailscale[/cyan] (free, more stable)")
+        return None
+
+    # Offer the tool the user has. Prefer ngrok — 30s setup, stable URL.
+    # Tailscale Funnel needs the host to be logged in + funnel enabled.
+    if has_ngrok and _confirm("  Use ngrok to open a public tunnel now?", default=True):
+        return _start_ngrok(sms_port, env)
+    if has_ts and _confirm("  Use Tailscale Funnel to open a public tunnel now?", default=True):
+        return _start_tailscale_funnel(sms_port)
+    return None
+
+
+def _start_ngrok(sms_port: str, env: dict[str, str]) -> str | None:
+    """Spawn ngrok on the SMS port and scrape the public URL from its local API."""
+    import subprocess, time, json, urllib.request
+
+    # Kill any prior ngrok that might be holding the port/tunnel
+    subprocess.run(["pkill", "-f", "ngrok http"], capture_output=True, timeout=3)
+    time.sleep(1)
+
+    # If the user has a reserved static domain, use it — URL won't change.
+    static_domain = env.get("NGROK_DOMAIN", "").strip()
+    args = ["ngrok", "http", sms_port]
+    if static_domain:
+        args += ["--domain", static_domain]
+
+    console.print(f"  Starting ngrok on :{sms_port}…")
+    try:
+        subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        console.print(f"  [red]ngrok failed to start: {e}[/red]")
+        return None
+
+    # Wait for the local API (127.0.0.1:4040) to publish the tunnel URL
+    for _ in range(20):
+        time.sleep(0.5)
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=1) as r:
+                payload = json.loads(r.read())
+            tunnels = payload.get("tunnels") or []
+            https = next((t.get("public_url") for t in tunnels if t.get("proto") == "https"), None)
+            if https:
+                # Remember the URL so cli.py can re-launch ngrok on startup
+                if static_domain:
+                    _write_env_updates({"NGROK_DOMAIN": static_domain})
+                else:
+                    # No reserved domain — the URL is ephemeral, only
+                    # useful for this session. Still save it so cli.py
+                    # doesn't spawn a second ngrok on startup.
+                    _write_env_updates({"NGROK_PUBLIC_URL": https})
+                return https
+        except Exception:
+            continue
+
+    console.print("  [red]ngrok started but its local API didn't respond.[/red] "
+                  "Check auth with [cyan]ngrok config check[/cyan].")
+    return None
+
+
+def _start_tailscale_funnel(sms_port: str) -> str | None:
+    """Start Tailscale Funnel on SMS port and parse the public URL."""
+    import subprocess, re as _re
+
+    # Funnel requires: (1) logged-in, (2) HTTPS cert provisioned, (3) node ACL
+    # allows funnel. We run `tailscale funnel --bg` which handles the provision.
+    console.print(f"  Starting Tailscale Funnel on :{sms_port}…")
+    try:
+        res = subprocess.run(
+            ["tailscale", "funnel", "--bg", f"http://127.0.0.1:{sms_port}"],
+            capture_output=True, text=True, timeout=20,
+        )
+    except Exception as e:
+        console.print(f"  [red]tailscale funnel failed: {e}[/red]")
+        return None
+
+    # The command prints something like:
+    #   Available on the internet:
+    #   https://my-mac.tailnet-xyz.ts.net/
+    combined = (res.stdout or "") + (res.stderr or "")
+    m = _re.search(r"https://[A-Za-z0-9.-]+\.ts\.net/?", combined)
+    if m:
+        url = m.group(0).rstrip("/")
+        _write_env_updates({"TAILSCALE_FUNNEL_URL": url})
+        return url
+
+    console.print(f"  [yellow]Couldn't parse Funnel URL.[/yellow] Output:")
+    console.print(f"  [dim]{combined.strip()[:300]}[/dim]")
+    console.print("  Enable funnel: [cyan]tailscale set --advertise-funnel[/cyan] "
+                  "or see [link]https://tailscale.com/kb/1223/funnel[/link]")
+    return None
+
+
+def _update_twilio_webhook(sid: str, token: str, phone: str, webhook_url: str) -> bool:
+    """PATCH the Twilio IncomingPhoneNumber so SMS POSTs land on webhook_url."""
+    import urllib.parse, urllib.request, base64, json
+
+    auth = base64.b64encode(f"{sid}:{token}".encode()).decode()
+    base = f"https://api.twilio.com/2010-04-01/Accounts/{sid}"
+
+    # 1. Look up the phone's SID (the SID of the number, not the account).
+    try:
+        listing_url = f"{base}/IncomingPhoneNumbers.json?PhoneNumber={urllib.parse.quote(phone)}"
+        req = urllib.request.Request(listing_url, headers={"Authorization": f"Basic {auth}"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read())
+        numbers = data.get("incoming_phone_numbers") or []
+        if not numbers:
+            console.print(f"  [yellow]No phone {phone} on this Twilio account.[/yellow]")
+            return False
+        phone_sid = numbers[0]["sid"]
+    except Exception as e:
+        console.print(f"  [red]Twilio phone lookup failed: {type(e).__name__}: {e}[/red]")
+        return False
+
+    # 2. PATCH it.
+    try:
+        update_url = f"{base}/IncomingPhoneNumbers/{phone_sid}.json"
+        body = urllib.parse.urlencode({"SmsUrl": webhook_url, "SmsMethod": "POST"}).encode()
+        req = urllib.request.Request(
+            update_url, data=body, method="POST",
+            headers={
+                "Authorization": f"Basic {auth}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            r.read()
+        return True
+    except Exception as e:
+        console.print(f"  [red]Twilio webhook update failed: {type(e).__name__}: {e}[/red]")
+        return False
+
+
+# ── Telegram ─────────────────────────────────────────────────────────────────
+
+def setup_telegram() -> int:
+    """Telegram bot — second channel alongside SMS for rich media (50 MB/file).
+
+    Flow:
+      1. Prompt for bot token from @BotFather.
+      2. Verify the token via ``getMe``.
+      3. Auto-discover the user's chat_id by polling ``getUpdates`` — the
+         user taps /start in Telegram, we grab the chat_id, save it to the
+         allowlist. No manual ID lookup needed.
+      4. Save to ~/Friday/.env. Restart FRIDAY to pick up the listener.
+    """
+    import json, time, urllib.parse, urllib.request
+
+    console.print()
+    console.print(Rule("Telegram (rich-media channel)", style="green"))
+    console.print()
+    console.print("  Telegram gives FRIDAY a second messaging channel with support for")
+    console.print("  photos, audio, voice notes, and documents up to 50 MB per file.")
+    console.print(f"  SMS stays on top for no-signal fallback — this is additive.")
+    console.print()
+    console.print("  [bold]1. Create a bot[/bold]")
+    console.print(f"     Open Telegram → message {_link('https://t.me/BotFather')}")
+    console.print("     Send: [cyan]/newbot[/cyan] → pick a name → pick a username ending in 'bot'")
+    console.print("     Copy the token BotFather gives you (looks like 123456:ABC-DEF…).")
+    console.print()
+
+    env = _read_env()
+    token = _ask("TELEGRAM_BOT_TOKEN",
+                 default=env.get("TELEGRAM_BOT_TOKEN", ""),
+                 secret=True)
+    if not token or ":" not in token:
+        console.print("  [red]Invalid token — aborting.[/red]")
+        return 2
+
+    # Verify the token
+    try:
+        with urllib.request.urlopen(
+            f"https://api.telegram.org/bot{token}/getMe", timeout=10,
+        ) as r:
+            me = json.loads(r.read())
+    except Exception as e:
+        console.print(f"  [red]Couldn't reach Telegram: {type(e).__name__}: {e}[/red]")
+        return 2
+    if not me.get("ok"):
+        console.print(f"  [red]Token rejected by Telegram: {me.get('description','?')}[/red]")
+        return 2
+    bot_username = me["result"].get("username", "?")
+    console.print(f"  [green]✓ Token valid[/green] — bot is [cyan]@{bot_username}[/cyan]")
+
+    # Auto-discover chat_id
+    console.print()
+    console.print("  [bold]2. Link your chat[/bold]")
+    console.print(f"     Open Telegram → search for [cyan]@{bot_username}[/cyan] → hit Start.")
+    console.print(f"     Or tap this link: {_link(f'https://t.me/{bot_username}')}")
+    console.print(f"     I'll wait up to 60s for your message…")
+
+    # Drain any queued updates so we only pick up NEW /start events
+    try:
+        with urllib.request.urlopen(
+            f"https://api.telegram.org/bot{token}/getUpdates?offset=-1&timeout=0", timeout=5,
+        ) as r:
+            drain = json.loads(r.read())
+        offset = (drain.get("result") or [{}])[-1].get("update_id", 0) + 1 if drain.get("result") else 0
+    except Exception:
+        offset = 0
+
+    chat_id: str | int | None = None
+    deadline = time.time() + 60
+    while time.time() < deadline and not chat_id:
+        try:
+            url = (f"https://api.telegram.org/bot{token}/getUpdates"
+                   f"?timeout=10&offset={offset}")
+            with urllib.request.urlopen(url, timeout=15) as r:
+                upd = json.loads(r.read())
+            for u in upd.get("result") or []:
+                offset = u["update_id"] + 1
+                msg = u.get("message") or u.get("edited_message") or {}
+                chat = msg.get("chat") or {}
+                if chat.get("id"):
+                    chat_id = chat["id"]
+                    who = (msg.get("from") or {}).get("username") or chat.get("title") or "you"
+                    console.print(f"  [green]✓ Linked[/green] — chat_id [cyan]{chat_id}[/cyan] ({who})")
+                    break
+        except Exception:
+            time.sleep(1)
+
+    updates = {"TELEGRAM_BOT_TOKEN": token}
+    if chat_id:
+        # Lock the bot to this chat by default — can be widened later.
+        updates["TELEGRAM_ALLOWED_CHAT_IDS"] = str(chat_id)
+    else:
+        console.print("  [yellow]Timed out waiting for /start.[/yellow] "
+                      "The bot will accept any chat until you set "
+                      "[cyan]TELEGRAM_ALLOWED_CHAT_IDS[/cyan] manually.")
 
     _write_env_updates(updates)
     console.print(f"  [green]✓ Saved[/green] → {ENV_PATH}")
-    if ngrok_domain:
-        console.print(f"  Point your Twilio phone number's webhook to [cyan]https://{ngrok_domain}/sms[/cyan] (POST)")
+    console.print()
+    console.print("  [dim]Restart FRIDAY for the listener to pick up.[/dim]")
     return 0
 
 
@@ -1170,11 +1484,13 @@ def update() -> int:
 _SETUP_COMMANDS: dict[str, Callable[[], int]] = {
     "deps":       setup_deps,
     "openrouter": setup_openrouter,
+    "gemma":      setup_gemma,
     "groq":       setup_groq,
     "tavily":     setup_tavily,
     "elevenlabs": setup_elevenlabs,
     "x":          setup_x,
     "twilio":     setup_twilio,
+    "telegram":   setup_telegram,
     "gmail":      setup_gmail,
     "voice":      setup_voice,
     "gestures":   setup_gestures,
