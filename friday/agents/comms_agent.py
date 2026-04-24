@@ -21,6 +21,27 @@ except Exception:
 
 # SMS tools — optional, only loaded if Twilio configured
 try:
+    from friday.tools.telegram_tools import TOOL_SCHEMAS as TELEGRAM_TOOLS
+    _HAS_TELEGRAM = True
+except Exception:
+    _HAS_TELEGRAM = False
+    TELEGRAM_TOOLS = {}
+
+try:
+    from friday.tools.file_tools import TOOL_SCHEMAS as FILE_TOOLS
+    _HAS_FILES = True
+except Exception:
+    _HAS_FILES = False
+    FILE_TOOLS = {}
+
+try:
+    from friday.tools.voice_tools import TOOL_SCHEMAS as VOICE_TOOLS
+    _HAS_VOICE = True
+except Exception:
+    _HAS_VOICE = False
+    VOICE_TOOLS = {}
+
+try:
     from friday.tools.sms_tools import TOOL_SCHEMAS as SMS_TOOLS
     _HAS_SMS = True
 except Exception:
@@ -28,7 +49,7 @@ except Exception:
     _HAS_SMS = False
 
 
-_BASE_PROMPT = """You handle email (Gmail), calendar (Google Calendar), iMessage, FaceTime, WhatsApp, and SMS for the user.
+_BASE_PROMPT = """You handle email (Gmail), calendar (Google Calendar), iMessage, FaceTime, WhatsApp, SMS, and Telegram for the user.
 
 ALWAYS respond in English.
 
@@ -84,6 +105,43 @@ TOOL CALL MAPPING — follow this exactly:
 - "sms X saying Y" / "send X an sms" → call send_sms(to=<phone number>, message=Y)
 - "text me on sms" / "sms me" → call send_sms(to=<CONTACT_PHONE env var>, message=...)
 - "check my sms" / "any sms" → call read_sms()
+
+TELEGRAM (rich-media channel — 50 MB per file, unlike SMS which is text only):
+- "send me X on telegram" / "telegram me X" / "send it to my telegram" → route via Telegram.
+- Figure out what TYPE the thing is, then call the right tool:
+    · Photo / image / screenshot → send_telegram_photo(path_or_url=..., caption=...)
+    · PDF / DOCX / MD / any document → send_telegram_document(path_or_url=..., caption=...)
+    · Voice note (OGG) → send_telegram_voice(path_or_url=...)
+    · Audio file (MP3 / M4A) → send_telegram_audio(path_or_url=...)
+    · Video (MP4) → send_telegram_video(path_or_url=...)
+    · Just text → send_telegram_message(message=...)
+- `chat_id` defaults to the user's own — you do NOT need to pass it.
+- If the user said "send me THE report" / "THE investigation" / "THE latest X" and
+  didn't give a path, use search_files to FIND it first, then send. Common dirs:
+    · Investigation reports  → ~/Friday/investigations/
+    · Deep-research outputs  → ~/Friday/research/
+    · Screenshots            → ~/Desktop/ or ~/Pictures/Screenshots/
+  Pick the newest matching file (search_files returns sorted by mtime).
+- Rich-media → always prefer Telegram over SMS. "Send me the investigation .docx"
+  from SMS still means: deliver via Telegram (SMS can't carry files). Confirm back
+  to the SMS sender once the Telegram delivery succeeds.
+- NEVER reply "sent" unless the tool actually returned success. If the Telegram
+  tool errors, tell the user what failed and why.
+
+VOICE NOTES ON TELEGRAM (ElevenLabs TTS → OGG → Telegram voice bubble):
+- "send me a voice note saying X on telegram" / "voice note X to my telegram"
+  / "tell me X in a voice note" → this is a 2-step chain in ONE ReAct round:
+    1. tts_to_file(text="X", format="ogg")  → returns {"path": "..."}
+    2. send_telegram_voice(path_or_url=<that path>)
+  Both tool calls can go in a single LLM response — tts_to_file is fast.
+- "read me the X / summarise X as a voice note" → first get the content (read_file
+  or whatever source applies), then tts_to_file with a CONDENSED version (under
+  500 chars — voice notes longer than that feel like podcasts, not notes), then
+  send_telegram_voice.
+- If the user wants a music-style audio (longer form) use format='mp3' +
+  send_telegram_audio instead of ogg + send_telegram_voice.
+- Don't overthink the script — speak naturally as FRIDAY would. Don't include
+  stage directions or "here is your voice note:" preamble — the audio IS the note.
 
 SMS:
 - send_sms requires a phone number with country code (e.g. +447555834656). NOT a name.
@@ -207,6 +265,27 @@ class CommsAgent(BaseAgent):
                 "send_sms": SMS_TOOLS["send_sms"],
                 "read_sms": SMS_TOOLS["read_sms"],
             })
+        # Telegram — rich-media channel (photos / audio / docs up to 50 MB).
+        # When the user asks "send me X on Telegram" this is how it
+        # actually happens.
+        if _HAS_TELEGRAM:
+            for k in ("send_telegram_message", "send_telegram_photo",
+                      "send_telegram_audio", "send_telegram_voice",
+                      "send_telegram_document", "send_telegram_video"):
+                if k in TELEGRAM_TOOLS:
+                    self.tools[k] = TELEGRAM_TOOLS[k]
+        # File discovery — so "send me the latest investigation report on
+        # Telegram" can find the file without the user naming an exact path.
+        if _HAS_FILES:
+            for k in ("search_files", "read_file"):
+                if k in FILE_TOOLS:
+                    self.tools[k] = FILE_TOOLS[k]
+        # Voice synthesis → file for "send me a voice note saying X on
+        # telegram". The agent chains tts_to_file → send_telegram_voice.
+        if _HAS_VOICE:
+            for k in ("tts_to_file",):
+                if k in VOICE_TOOLS:
+                    self.tools[k] = VOICE_TOOLS[k]
         super().__init__()
 
     async def run(self, task: str, context: str = "", on_tool_call=None, on_chunk=None):

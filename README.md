@@ -134,7 +134,7 @@ Every major subsystem has its own doc. Read the ones relevant to what you're doi
 | Notifications | [docs/notifications.md](docs/notifications.md) | iMessage-to-self + Twilio SMS push |
 | Telegram | [docs/telegram.md](docs/telegram.md) | Rich-media channel (50 MB/file), long-polling, no tunnel |
 | Deep research | [docs/deep-research.md](docs/deep-research.md) | Multi-agent parallel → full document output |
-| Improvement mode | [docs/improvement-mode.md](docs/improvement-mode.md) | Correction capture, skills system, self-improving patterns |
+| Improvement mode | [docs/improvement-mode.md](docs/improvement-mode.md) | Correction capture, task-aware skill selection, self-improving patterns |
 | Screen vision | [docs/screen-vision.md](docs/screen-vision.md) | OCR + VLM + page solver → `.docx` |
 | Gesture control | [docs/gesture-control.md](docs/gesture-control.md) | 29 MediaPipe gestures, Iron-Man pinch drag |
 | Personality | [docs/user-config.md](docs/user-config.md) | `~/Friday/user.json` — name, bio, tone, slang, CV |
@@ -155,8 +155,8 @@ Each one is a one-shot wizard. Paste your API key (or log in via OAuth) and it's
 | **Tavily** *(web search)* | `friday setup tavily` | Agent-optimised web search, research + briefings | [docs/setup-tavily.md](docs/setup-tavily.md) |
 | **Gmail + Calendar** | `friday setup gmail` | Read/search/draft/send mail, calendar events — bundled OAuth, just sign in | [docs/setup-google.md](docs/setup-google.md) |
 | **Twilio SMS** | `friday setup twilio` | Text FRIDAY from any phone, outbound SMS | [docs/sms-setup.md](docs/sms-setup.md) |
-| **Telegram** | `friday setup telegram` | Second channel, 50 MB/file rich media, no tunnel, free | [docs/telegram.md](docs/telegram.md) |
-| **ElevenLabs TTS** | `friday setup elevenlabs` | Cloud voice (~75ms). Optional — Kokoro runs locally if you skip. | [docs/setup-voice.md](docs/setup-voice.md) |
+| **Telegram** | `friday setup telegram` | Second channel, 50 MB/file rich media, voice notes with audio-tag emotion (Eleven v3), cross-channel SMS → Telegram delivery of docs/images/voice. No tunnel, free. | [docs/telegram.md](docs/telegram.md) |
+| **ElevenLabs TTS** | `friday setup elevenlabs` | Cloud voice (~75ms live, Eleven v3 with audio tags for voice notes). Optional — Kokoro runs locally if you skip. | [docs/setup-voice.md](docs/setup-voice.md) |
 | **X (Twitter)** | `friday setup x` | Post, mentions, search, retweets, likes | — |
 | **WhatsApp** | see guide | Read/send WhatsApp via local Baileys bridge | [docs/whatsapp-setup.md](docs/whatsapp-setup.md) |
 | **Voice** | `friday setup voice` | Always-on ambient listen, wake word "Friday" | [docs/setup-voice.md](docs/setup-voice.md) |

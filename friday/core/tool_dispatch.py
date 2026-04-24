@@ -85,6 +85,8 @@ TOOL_NAMES = [
     # Telegram (second channel — rich media since UK SMS can't carry MMS)
     "send_telegram_message", "send_telegram_photo", "send_telegram_audio",
     "send_telegram_voice", "send_telegram_document", "send_telegram_video",
+    # Voice synthesis → file, pairs with the telegram voice/audio tools
+    "tts_to_file",
     # Social
     "search_x", "get_my_mentions",
     # Information
@@ -147,8 +149,15 @@ def _build_tools():
     except Exception:
         tg = {}
 
+    # Voice synthesis → file (ElevenLabs TTS saved to disk). Pairs with
+    # Telegram voice/audio tools for "send me a voice note saying X".
+    try:
+        from friday.tools.voice_tools import TOOL_SCHEMAS as vt
+    except Exception:
+        vt = {}
+
     all_schemas = {}
-    for src in [email, cal, calls, web, x, mac, mem, files, brief, imsg, cron, watch, screen, cast, wa, sms, tg]:
+    for src in [email, cal, calls, web, x, mac, mem, files, brief, imsg, cron, watch, screen, cast, wa, sms, tg, vt]:
         all_schemas.update(src)
 
     DIRECT_TOOLS.update({n: all_schemas[n] for n in TOOL_NAMES if n in all_schemas})

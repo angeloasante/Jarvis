@@ -471,6 +471,115 @@ async def open_url(url: str, browser: str = "") -> ToolResult:
         )
 
 
+async def get_music_status() -> ToolResult:
+    """Return the current playback state of Mac audio apps in one shot.
+
+    Checks Music.app (Apple Music) and Spotify in parallel. Returns a
+    dict like:
+        {
+          "music_app": {"state": "playing|paused|stopped", "track": "...",
+                        "artist": "...", "running": True|False},
+          "spotify":   {"state": "playing|paused|stopped", "track": "...",
+                        "artist": "...", "running": True|False},
+          "any_playing": True|False,
+        }
+
+    Used by household_agent to disambiguate "pause the music" — the LLM
+    checks this against tv_status, then pauses whichever surface is
+    actually playing. Also surfaces "currently on Music.app" so the
+    agent can answer "what am I listening to" without guessing.
+    """
+    # Pipe-delimited output. Python parses it. Format per app:
+    #   music_app|<state>|<running>|<track>|<artist>
+    #   spotify|<state>|<running>|<track>|<artist>
+    # Separator between the two apps: a literal ";;"  (unlikely in metadata).
+    # AppleScript can't `tell application <variable>` — each app needs a
+    # literal tell block. But if an app isn't installed, its literal tell
+    # block won't even parse. So we build the script dynamically, adding
+    # the Spotify block only when Spotify.app is present on disk.
+    from pathlib import Path as _Path
+    spotify_installed = (
+        _Path("/Applications/Spotify.app").exists()
+        or _Path.home().joinpath("Applications/Spotify.app").exists()
+    )
+
+    spotify_block = ""
+    if spotify_installed:
+        spotify_block = '''
+if my isAppRunning("Spotify") then
+    try
+        tell application "Spotify"
+            set ps to (player state as text)
+            set t to ""
+            set a to ""
+            if ps is "playing" or ps is "paused" then
+                try
+                    set t to name of current track
+                end try
+                try
+                    set a to artist of current track
+                end try
+            end if
+        end tell
+        set spotLine to "spotify|" & ps & "|true|" & t & "|" & a
+    end try
+end if
+'''
+
+    script = f'''
+on isAppRunning(appName)
+    tell application "System Events"
+        return (exists (processes where name is appName))
+    end tell
+end isAppRunning
+
+set musicLine to "music_app|stopped|false||"
+set spotLine  to "spotify|not_installed|false||"
+
+if my isAppRunning("Music") then
+    try
+        tell application "Music"
+            set ps to (player state as text)
+            set t to ""
+            set a to ""
+            if ps is "playing" or ps is "paused" then
+                try
+                    set t to name of current track
+                end try
+                try
+                    set a to artist of current track
+                end try
+            end if
+        end tell
+        set musicLine to "music_app|" & ps & "|true|" & t & "|" & a
+    end try
+end if
+{spotify_block}
+return musicLine & ";;" & spotLine
+'''
+    r = await run_applescript(script)
+    if not r.success:
+        return r
+    raw = (r.data or {}).get("output", "").strip()
+    out: dict = {}
+    for line in raw.split(";;"):
+        parts = line.split("|", 4)
+        if len(parts) < 5:
+            continue
+        tag, state, running, track, artist = parts
+        out[tag] = {
+            "state": state,
+            "running": running.lower() == "true",
+            "track": track,
+            "artist": artist,
+        }
+    out["any_playing"] = any(
+        (out.get(k) or {}).get("state") == "playing"
+        for k in ("music_app", "spotify")
+    )
+    return ToolResult(success=True, data=out)
+
+
 async def play_music(
     query: str = "",
     action: str = "play",
@@ -524,33 +633,89 @@ async def play_music(
     def esc(s: str) -> str:
         return s.replace("\\", "\\\\").replace('"', '\\"')
 
+    # Build candidate title strings to try in order. Only strip leading
+    # articles ("I ", "a ", "the ") — that's the common spoken-vs-actual
+    # mismatch. We intentionally do NOT shorten the tail, because plenty
+    # of real songs have long titles and trimming them would match the
+    # wrong track.
+    def _title_variants(t: str) -> list[str]:
+        t = t.strip()
+        if not t:
+            return []
+        low = t.lower()
+        out = [t]
+        for lead in ("i ", "a ", "an ", "the "):
+            if low.startswith(lead):
+                stripped = t[len(lead):].strip()
+                if stripped and stripped not in out:
+                    out.append(stripped)
+        return out
+
+    title_candidates = _title_variants(title_part)
+    # AppleScript literal list for the candidates
+    as_list = ", ".join(f'"{esc(v)}"' for v in title_candidates) or '""'
     q = esc(q_raw)
     title_q = esc(title_part)
     artist_q = esc(artist_part)
+    # Searches `library playlist 1` AND every user-made playlist.
+    # User playlists can hold cloud-reference tracks that aren't directly
+    # in the library listing — common when a user has added a song to
+    # a playlist without explicitly "Add to Library". We check
+    # every playlist so those are still reachable.
     script = f'''
 set fullQ to "{q}"
-set titleQ to "{title_q}"
 set artistQ to "{artist_q}"
+set titleVariants to {{{as_list}}}
 
 tell application "Music"
     activate
     set matches to {{}}
 
-    -- 1. title + artist both known → match both (strongest)
-    if artistQ is not "" then
-        try
-            set matches to (every track whose name contains titleQ and artist contains artistQ) of library playlist 1
-        end try
-    end if
+    repeat with tQ in titleVariants
+        set titleQ to contents of tQ
 
-    -- 2. exact-ish title match in library. (Skip when the user gave a specific
-    --    "X by Y" — if we don't find X by Y, don't grab any X-titled track by
-    --    someone else; go to cloud search instead.)
-    if (count of matches) is 0 and artistQ is "" then
-        try
-            set matches to (every track whose name contains titleQ) of library playlist 1
-        end try
-    end if
+        -- 1. title + artist → strongest match, library first, then playlists
+        if artistQ is not "" then
+            try
+                set matches to (every track whose name contains titleQ and artist contains artistQ) of library playlist 1
+            end try
+            if (count of matches) is 0 then
+                try
+                    repeat with p in (every user playlist)
+                        try
+                            set pm to (every track whose name contains titleQ and artist contains artistQ) of p
+                            if (count of pm) > 0 then
+                                set matches to pm
+                                exit repeat
+                            end if
+                        end try
+                    end repeat
+                end try
+            end if
+        end if
+
+        -- 2. title-only — library first, then every user playlist
+        if (count of matches) is 0 and artistQ is "" then
+            try
+                set matches to (every track whose name contains titleQ) of library playlist 1
+            end try
+            if (count of matches) is 0 then
+                try
+                    repeat with p in (every user playlist)
+                        try
+                            set pm to (every track whose name contains titleQ) of p
+                            if (count of pm) > 0 then
+                                set matches to pm
+                                exit repeat
+                            end if
+                        end try
+                    end repeat
+                end try
+            end if
+        end if
+
+        if (count of matches) > 0 then exit repeat
+    end repeat
 
     if (count of matches) > 0 then
         play item 1 of matches
@@ -577,6 +742,38 @@ return "NOT_IN_LIBRARY"
     # canonical Apple Music URL in Music. No UI typing, no focus fights.
     hit = await _itunes_search(q_raw)
     if not hit or not hit.get("trackViewUrl"):
+        # iTunes Search API lags Apple Music's catalogue — indie / global
+        # releases are often missing from Search even though they stream
+        # fine via the Music app. Fallback: open the Music app's own
+        # search page with the query so the user's tap becomes one
+        # action instead of "not found".
+        import urllib.parse as _up
+        search_url = (
+            f"music://music.apple.com/{_user_country().lower()}/search?"
+            + _up.urlencode({"term": q_raw})
+        )
+        fallback_script = f'''
+tell application "Music"
+    activate
+    open location "{search_url}"
+end tell
+return "OPENED_SEARCH"
+'''
+        fb = await run_applescript(fallback_script)
+        if fb.success:
+            return ToolResult(
+                success=True,
+                data={
+                    "action": "opened_search",
+                    "source": "apple_music_search",
+                    "query": q_raw,
+                    "message": (
+                        f"iTunes Search didn't index '{q_raw}' — opened "
+                        f"Apple Music search for it so you can tap the "
+                        f"right track."
+                    ),
+                },
+            )
         return ToolResult(
             success=False,
             error=ToolError(
@@ -856,6 +1053,25 @@ TOOL_SCHEMAS = {
                     },
                     "required": ["url"],
                 },
+            },
+        },
+    },
+    "get_music_status": {
+        "fn": get_music_status,
+        "schema": {
+            "type": "function",
+            "function": {
+                "name": "get_music_status",
+                "description": (
+                    "Check whether Music.app (Apple Music) or Spotify is currently "
+                    "playing on the Mac. Returns a dict with state + current track "
+                    "for each app, plus a top-level 'any_playing' boolean. Use this "
+                    "BEFORE pausing/resuming when the user says 'pause the music' "
+                    "without specifying a surface — combined with tv_status, you can "
+                    "tell whether the music is on the TV, Music.app, or Spotify, "
+                    "and act on whichever is actually playing."
+                ),
+                "parameters": {"type": "object", "properties": {}, "required": []},
             },
         },
     },

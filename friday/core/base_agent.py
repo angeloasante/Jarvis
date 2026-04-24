@@ -72,6 +72,12 @@ class BaseAgent:
     tool_definitions: list[dict] = []  # Ollama tool schemas
     max_iterations: int = 10
     model: str | None = None  # Override cloud model for this agent (None = use default)
+    # Per-agent provider preference passed to cloud_chat. When set,
+    # matching entries in the fallback chain get bumped to the front.
+    # Used e.g. by investigation_agent = "groq" so OSINT work goes to
+    # Qwen3 (which engages) instead of Gemma :free (daily-capped) or
+    # Gemini (refuses). Empty string = global default order.
+    preferred_provider: str = ""
 
     def __init__(self):
         self._build_tool_definitions()
@@ -106,9 +112,15 @@ class BaseAgent:
         start = time.monotonic()
         tools_called = []
 
-        # Load skills for this agent — instruction docs that improve reasoning
-        from friday.skills.loader import build_skill_context
-        skill_context = build_skill_context(self.name)
+        # Task-aware skill selection — pick only the 1-3 skills actually
+        # relevant to THIS user task instead of blindly appending every
+        # agent-matching skill (the old build_skill_context behaviour).
+        # Falls back safely: no Ollama embedder → LLM-only selection; no
+        # cloud LLM → all agent-matching skills (original behaviour).
+        from friday.skills.selector import build_skill_context_for_task
+        skill_context = build_skill_context_for_task(
+            self.name, task, preferred_provider=self.preferred_provider,
+        )
         full_system = self.system_prompt
         if skill_context:
             full_system += f"\n\n# SKILLS (follow these instructions)\n\n{skill_context}"
@@ -119,6 +131,37 @@ class BaseAgent:
         if context:
             messages.append({"role": "system", "content": f"Context:\n{context}"})
         messages.append({"role": "user", "content": task})
+
+        # Track file paths produced by tools (screenshots, PDFs, CVs, etc.)
+        # This is ground truth from ToolResult.data — no regex on response text.
+        media_paths: list[str] = []
+
+        def _extract_paths(data) -> list[str]:
+            """Pull file paths from a tool result's data field.
+            Looks for keys like saved_path, path, file_path, output_path,
+            and any string value that looks like a local file path we should preview.
+            """
+            found: list[str] = []
+            path_keys = {"saved_path", "path", "file_path", "output_path",
+                         "saved_to", "image_path", "output"}
+            media_exts = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic",
+                          ".bmp", ".tiff", ".mp4", ".mov", ".m4v",
+                          ".mp3", ".m4a", ".wav", ".pdf", ".docx")
+
+            def walk(obj):
+                if isinstance(obj, dict):
+                    for k, v in obj.items():
+                        if isinstance(v, str) and k in path_keys:
+                            if v.startswith("/") and v.lower().endswith(media_exts):
+                                found.append(v)
+                        else:
+                            walk(v)
+                elif isinstance(obj, list):
+                    for item in obj:
+                        walk(item)
+
+            walk(data)
+            return found
 
         for iteration in range(self.max_iterations):
             # After first tool execution, strip tools so the model generates
@@ -133,6 +176,7 @@ class BaseAgent:
                 messages=messages,
                 tools=offer_tools,
                 model=self.model,
+                preferred_provider=self.preferred_provider,
             )
 
             tool_calls = extract_tool_calls(response)
@@ -149,12 +193,25 @@ class BaseAgent:
                     final_answer=text or "", success=True,
                     duration_ms=dur, iterations=iteration + 1,
                 )
+                # Autonomous skill creation — fire-and-forget. Triggers only
+                # on successful tasks with 5+ tool calls (non-trivial
+                # workflows). Dedups against existing skills via embeddings.
+                try:
+                    from friday.skills.creator import schedule as _autoskill
+                    _autoskill(
+                        agent_name=self.name, task=task,
+                        tools_called=tools_called,
+                        final_result=text or "", success=True,
+                    )
+                except Exception:
+                    pass
                 return AgentResponse(
                     agent_name=self.name,
                     success=True,
                     result=text,
                     tools_called=tools_called,
                     duration_ms=dur,
+                    media_paths=list(dict.fromkeys(media_paths)),  # dedupe, preserve order
                 )
 
             # Process tool calls
@@ -185,6 +242,10 @@ class BaseAgent:
                     on_tool_call(tool_name, tool_args)
 
                 result = await self.execute_tool(tool_name, tool_args)
+
+                # Capture any file paths produced (screenshots, PDFs, etc.)
+                if result.success:
+                    media_paths.extend(_extract_paths(result.data))
 
                 tool_content = {
                     "success": result.success,
@@ -224,6 +285,8 @@ class BaseAgent:
                         tool_content = {"success": False, "data": str(res)}
                     else:
                         _, result = res
+                        if result.success:
+                            media_paths.extend(_extract_paths(result.data))
                         tool_content = {
                             "success": result.success,
                             "data": _compact_data(result.data),

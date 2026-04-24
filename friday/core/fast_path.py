@@ -138,8 +138,8 @@ async def match_fast(s: str):
 
     # ── TV Pause/Resume ──
     # Only fire TV pause/resume when the user EXPLICITLY names tv/video/show/movie.
-    # Bare "pause" / "pause the music" goes to the LLM so it can pick between
-    # tv_play_pause (TV) and play_music (Mac Music).
+    # Bare "pause the music" is ambiguous and goes to the LLM so it can
+    # decide between the TV, Music.app on the Mac, Spotify, etc.
     if re.match(r"^pause\s*(the\s+)?(tv|video|show|movie|telly)\s*[.!]?$", s):
         r = await tv_play_pause("pause")
         return ("Paused." if r.success else "Couldn't pause."), r

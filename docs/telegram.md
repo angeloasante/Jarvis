@@ -73,6 +73,72 @@ Destination defaults to the first ID in `TELEGRAM_ALLOWED_CHAT_IDS`, falling bac
 
 ---
 
+## Cross-channel delivery: SMS → Telegram
+
+The common real-world flow: you text FRIDAY on SMS ("send me the latest Richard Asante investigation on Telegram") and the result lands on Telegram. That chain is now end-to-end wired:
+
+```
+SMS inbound                           (friday/sms/server.py)
+  ↓
+dispatch_background                   (friday/core/orchestrator.py)
+  ↓
+router.match_agent → comms_agent      (friday/core/router.py)
+  ↓
+comms_agent.run:                      (friday/agents/comms_agent.py)
+  1. search_files(query, ~/Friday/investigations/)
+  2. send_telegram_document(path_or_url=...)
+  ↓
+SMS reply: "Sent the Richard Asante report to your Telegram."
+```
+
+Key enablers (already merged):
+
+- **Router**: the comms-pattern block matches `(send|shoot|forward|drop|text|push) … (on|to|via) telegram`, `telegram me (it|that|this)`, and bare `telegram`. Misc phrasings all land on comms_agent.
+- **comms_agent tools**: imports every `send_telegram_*` tool plus `search_files` and `read_file` from file_tools, so it can find a file by fuzzy name before sending.
+- **`search_files` normalisation**: spaces, underscores, and dashes are treated as equivalent in filenames — so `"Richard Asante"` matches `richard_asante_20260422_205436.docx` on disk.
+- **Agent prompt**: explicit decision tree for rich-media ("document → `send_telegram_document`; photo → `send_telegram_photo`; voice note → `tts_to_file` → `send_telegram_voice`") plus a hard rule — **never reply "sent" unless the tool actually returned success**.
+
+### Voice notes via ElevenLabs v3
+
+The LLM renders voice notes by chaining **two tools** in one ReAct round:
+
+1. `tts_to_file(text, format="ogg")` — POSTs to ElevenLabs' `/v1/text-to-speech/{voice_id}` with `model_id=eleven_v3`. Saves the MP3, converts to OGG/Opus via ffmpeg (48 kbps, speech-tuned). Returns the path.
+2. `send_telegram_voice(path_or_url=...)` — uploads as a Telegram voice-note bubble.
+
+**Emotion via audio tags.** Eleven v3 accepts inline tags right in the text:
+
+```
+"Alright Travis [sighs] OpenRouter is still rate-limited [laughs]
+but Groq's carrying the load. [excited] Oh, and the voice pipeline
+finally works end to end."
+```
+
+Supported tags include `[laughs]`, `[laughs harder]`, `[starts laughing]`, `[wheezing]`, `[whispers]`, `[excited]`, `[sad]`, `[curious]`, `[sighs]`, `[sarcastic]`. They're voice-dependent — some voices carry laughter well, others sound forced. Test short samples.
+
+**Tuned voice_settings** (in [`friday/tools/voice_tools.py`](../friday/tools/voice_tools.py)):
+
+```python
+"voice_settings": {
+    "stability": 0.35,       # lets tone swing with audio tags
+    "similarity_boost": 0.75,
+    "style": 0.65,           # surfaces emotional inflection
+    "use_speaker_boost": True,
+}
+```
+
+Lower `stability` + higher `style` = more expressive. Too low stability = unstable pacing; too high style = hammy. 0.35 / 0.65 is the current sweet spot.
+
+**Format comparison:**
+
+| Format | Telegram UI | File size (typical) | ffmpeg required |
+|---|---|---|---|
+| `ogg` | Voice-note bubble with waveform | ~100 KB for 15 s | ✓ (MP3 → Opus conversion) |
+| `mp3` | Audio-player row | ~250 KB for 15 s | — |
+
+Pick `ogg` for personal voice messages; `mp3` for longer clips that should look like music/podcasts.
+
+**Cost note.** Eleven v3 is billed the same per-char as the other tiers, but the expressive model burns ~30–50% more characters than flash for the same input (audio tags count, and the model sometimes emphasises syllables you didn't ask for). A typical 200-char voice note is ~$0.01 on v3 vs ~$0.006 on flash v2.5. Negligible for personal use.
+
 ## Environment variables
 
 | Var | Purpose | Required |
@@ -80,8 +146,11 @@ Destination defaults to the first ID in `TELEGRAM_ALLOWED_CHAT_IDS`, falling bac
 | `TELEGRAM_BOT_TOKEN` | BotFather token (e.g. `123456:ABC-…`) | Yes |
 | `TELEGRAM_ALLOWED_CHAT_IDS` | Comma-separated chat IDs permitted to talk to the bot | Recommended |
 | `TELEGRAM_CHAT_ID` | Legacy default destination if allowlist is empty | Optional |
+| `ELEVENLABS_API_KEY` | ElevenLabs key — needed for voice notes via `tts_to_file` | Optional (voice notes only) |
+| `ELEVENLABS_VOICE_ID` | Default voice for generated clips | Optional (has sensible default) |
+| `ELEVENLABS_EXPRESSIVE_MODEL` | TTS model for rendered files. Default `eleven_v3` (supports audio tags). Set to `eleven_flash_v2_5` for cheapest/fastest if you don't need emotion. | Optional |
 
-All written to `~/Friday/.env` by the wizard. Edit by hand if you want to add a second person's chat_id later.
+All live in `~/Friday/.env` — the single source of truth for user-specific values. The repo's dev `.env` is no longer used for secrets.
 
 ---
 
@@ -125,6 +194,7 @@ If `/telegram` reports `DOWN`, the token is likely revoked — regenerate via `@
 
 - **Group chats.** The bot is personal. Group-chat support would need per-chat policy (who can command what) which is more scope than warranted today. Message if you want it.
 - **Inbound photo OCR / voice-note transcription.** You can send FRIDAY a photo, but it won't auto-OCR the contents yet. Wire it via `screen_vision` once/if needed.
+- **Inbound voice-note ASR.** Outbound voice notes work (`tts_to_file` → `send_telegram_voice`). Inbound — where the USER records a voice note in Telegram and FRIDAY transcribes + acts — isn't wired. Would slot into `friday/telegram/bot.py` alongside the text handler using the existing STT pipeline.
 - **Webhook mode.** Polling is simpler and enough for single-user use. Webhook is faster only above ~50 msg/sec which is beyond personal-assistant scale.
 
 ---

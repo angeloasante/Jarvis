@@ -80,13 +80,31 @@ def chat(
 
 _cloud_client = None
 
+# Session-level cache of providers that have returned an irrecoverable
+# daily-limit error. Once a provider is here, we skip it for the rest of
+# the process lifetime — no retries, no wasted cascades. Reset by
+# restarting FRIDAY.
+_exhausted_providers: set[str] = set()
+
+# Session-level cache of providers that have ALREADY printed a "transient
+# failure, falling back" message. Keeps the CLI quiet: one compact note
+# per provider per session, not a wall of text on every 429.
+_warned_transient: set[str] = set()
+
+# Session-level cache of providers that have already been logged as
+# "answered via fallback". Same rule: log once per provider per session
+# so the user sees the route change, then stay quiet on repeat calls.
+_logged_fallback: set[str] = set()
+
 
 def _get_cloud_client():
     """Lazy-init the OpenAI client for cloud LLM (primary provider only)."""
     global _cloud_client
     if _cloud_client is None and CLOUD_API_KEY:
         from openai import OpenAI
-        _cloud_client = OpenAI(base_url=CLOUD_BASE_URL, api_key=CLOUD_API_KEY)
+        # max_retries=0 → don't let the SDK burn requests on its own 429
+        # backoff loop. We handle retries at the cascade layer.
+        _cloud_client = OpenAI(base_url=CLOUD_BASE_URL, api_key=CLOUD_API_KEY, max_retries=0)
     return _cloud_client
 
 
@@ -100,9 +118,63 @@ def _client_for(base_url: str, api_key: str):
     client = _provider_clients.get(key)
     if client is None:
         from openai import OpenAI
-        client = OpenAI(base_url=base_url, api_key=api_key)
+        client = OpenAI(base_url=base_url, api_key=api_key, max_retries=0)
         _provider_clients[key] = client
     return client
+
+
+def _short_provider_name(label: str) -> str:
+    """Human-readable one-word provider name for CLI messages.
+
+    Turns ``'primary (https://openrouter.ai/api/v1)'`` into ``'OpenRouter'``,
+    ``'groq'`` → ``'Groq'``, etc. Used in the compact one-line rate-limit
+    messages shown to the user.
+    """
+    l = (label or "").lower()
+    if "openrouter" in l:          return "OpenRouter"
+    if "groq" in l:                return "Groq"
+    if "generativelanguage" in l or "google" in l: return "Google AI Studio"
+    if "anthropic" in l:           return "Anthropic"
+    if "together" in l:            return "Together"
+    if "fireworks" in l:           return "Fireworks"
+    if "ollama" in l or "localhost" in l: return "Ollama"
+    # Pull first host segment out of 'primary (https://x.y.z/v1)' if any
+    import re as _re
+    m = _re.search(r"https?://([^/]+)", label or "")
+    if m:
+        host = m.group(1).split(".")
+        return host[0].capitalize() if host else "cloud"
+    return label or "cloud"
+
+
+def _next_provider_hint(current_label: str, attempts: list) -> str:
+    """Return the human-readable name of the NEXT provider after
+    ``current_label`` in the attempt order, or empty string if none."""
+    seen_current = False
+    for _client, _mdl, lbl in attempts:
+        if seen_current:
+            return _short_provider_name(lbl)
+        if lbl == current_label:
+            seen_current = True
+    return ""
+
+
+def _is_daily_limit_error(exc: BaseException) -> bool:
+    """Return True when the error says 'you've exhausted today's free quota'.
+
+    These errors won't resolve within the session — no point retrying the
+    same provider for hours. Mark it exhausted and skip future attempts.
+    """
+    msg = str(exc).lower()
+    markers = (
+        "free-models-per-day",         # openrouter daily cap
+        "rate limit exceeded: free",   # openrouter quota wording
+        "usage limit",                 # generic
+        "quota exceeded",
+        "daily limit",
+        "resource_exhausted",          # google quota error
+    )
+    return any(m in msg for m in markers)
 
 
 def _normalize_openai_response(response) -> dict:
@@ -235,6 +307,7 @@ def cloud_chat(
     stream: bool = False,
     max_tokens: int | None = None,
     model: str | None = None,
+    preferred_provider: str = "",
 ):
     """LLM call with runtime provider fallback.
 
@@ -246,6 +319,16 @@ def cloud_chat(
          next provider in the chain gets the request.
       3. If every cloud provider fails, drop to local Ollama (which always
          works if ``ollama serve`` is running).
+
+    Args:
+        preferred_provider: If set (e.g. ``"groq"``), that provider is
+            tried FIRST regardless of the global primary. Useful when a
+            specific agent needs a specific model — e.g. investigation
+            work wants Qwen3 on Groq because Gemini refuses OSINT and
+            OpenRouter's daily-cap usually 429s the primary Gemma call.
+            Other providers still fallback below it. Matches against the
+            ``label`` strings the chain uses ("primary (...)", "groq",
+            "google", "openrouter").
 
     The first successful response wins and returns. We log which provider
     answered so ``friday doctor`` / debug output reflects reality.
@@ -266,8 +349,30 @@ def cloud_chat(
         client = _client_for(base_url, key)
         primary_attempts.append((client, default_model, name))
 
+    # Skip providers that already hit their daily quota this session —
+    # no point burning a few hundred ms on a guaranteed failure.
+    primary_attempts = [
+        (c, m, l) for (c, m, l) in primary_attempts
+        if l not in _exhausted_providers
+    ]
+
+    # Agent-level preference override — bump matching entries to the front.
+    # Match is case-insensitive substring on the label so either "groq" or
+    # the full base-url form ("primary (https://api.groq.com/...)") works.
+    if preferred_provider:
+        pref = preferred_provider.lower()
+        preferred = [t for t in primary_attempts if pref in t[2].lower()]
+        rest     = [t for t in primary_attempts if pref not in t[2].lower()]
+        primary_attempts = preferred + rest
+        if preferred:
+            log.debug("cloud_chat: preferring provider '%s' — order now: %s",
+                      preferred_provider, [t[2] for t in primary_attempts])
+
     if not primary_attempts:
-        # No cloud providers configured at all — straight to local Ollama.
+        # Either nothing configured OR everything exhausted — local Ollama.
+        if _exhausted_providers:
+            log.info("All cloud providers exhausted this session — using local Ollama. "
+                     "Restart FRIDAY to retry cloud providers.")
         return chat(messages=messages, tools=tools, stream=stream,
                     max_tokens=max_tokens, think=False)
 
@@ -278,15 +383,43 @@ def cloud_chat(
                 client, mdl, messages, tools, stream, max_tokens,
             )
             if label != primary_attempts[0][2]:
-                # We used a fallback — note it. Useful for doctor/debug.
-                log.info("cloud_chat answered via fallback provider: %s", label)
+                # We used a fallback. Log once per provider at INFO so
+                # friday doctor / first-call debug still sees it; any
+                # subsequent use of the same fallback goes to DEBUG.
+                if label not in _logged_fallback:
+                    _logged_fallback.add(label)
+                    log.info("cloud_chat answered via fallback provider: %s", label)
+                else:
+                    log.debug("cloud_chat via fallback provider: %s", label)
             return result
         except Exception as e:
             if not _is_retriable(e):
                 raise
             last_error = e
-            log.warning("cloud_chat provider '%s' failed (%s: %s) — trying next",
-                        label, type(e).__name__, str(e)[:140])
+            # Daily-quota errors don't resolve within the session. Mark the
+            # provider as exhausted so the NEXT call skips it entirely.
+            if _is_daily_limit_error(e):
+                _exhausted_providers.add(label)
+                # Compact one-time note; subsequent calls go silent because
+                # we skip the provider upfront now.
+                short = _short_provider_name(label)
+                log.warning(":: %s daily limit reached — skipping for session", short)
+            else:
+                # Transient error (429 upstream, temporary outage). Log ONE
+                # compact line per provider per session — repeated 429s on
+                # the same provider drop to DEBUG so the CLI stays clean.
+                short = _short_provider_name(label)
+                if label not in _warned_transient:
+                    _warned_transient.add(label)
+                    next_label = _next_provider_hint(label, primary_attempts)
+                    if next_label:
+                        log.warning(":: %s rate-limited — routing to %s",
+                                    short, next_label)
+                    else:
+                        log.warning(":: %s rate-limited — trying fallback", short)
+                else:
+                    log.debug("cloud_chat provider '%s' still failing (%s)",
+                              label, type(e).__name__)
             continue
 
     # Every cloud provider failed — drop to local Ollama as final fallback.

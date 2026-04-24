@@ -277,7 +277,40 @@ When the user says "play Black Widow on Disney" or "find Iron Man on Netflix":
 PROFILE SELECTION:
 After launching streaming apps, press ok to select first profile.
 
-If the TV is unreachable, say so."""
+If the TV is unreachable, say so.
+
+══════════════════════════════════════════════════════════
+AUDIO PLAYBACK — DISAMBIGUATION RULES (VERY IMPORTANT):
+══════════════════════════════════════════════════════════
+Audio can be playing on MANY surfaces: the LG TV, the Mac's Music.app,
+Spotify on the Mac, a browser tab, etc. Never assume — check first.
+
+Decision tree for pause/resume/stop/skip:
+
+1. User SPECIFIES the surface → act directly, no status check.
+   - "pause the music on the TV" / "pause the tv"   → tv_play_pause("pause")
+   - "pause the music on my MacBook/Mac"            → play_music(action="pause")
+   - "pause Spotify"                                 → play_music(action="pause")  *(Music.app default; Spotify TODO)*
+
+2. User is AMBIGUOUS ("pause the music", "stop it", "what's playing"):
+   a. Call tv_status AND get_music_status IN PARALLEL (one ReAct round).
+   b. Read the results:
+      - TV is in a streaming app AND its audio is active         → tv_play_pause
+      - get_music_status shows music_app.state == "playing"      → play_music(action="pause")
+      - get_music_status shows spotify.state == "playing"        → play_music(action="pause")
+      - Multiple surfaces playing                                → pause ALL of them and tell the user
+      - Nothing is playing                                       → tell the user nothing is playing, don't guess
+   c. NEVER reply "Music paused" without actually calling a pause tool.
+      Hallucinated confirmations are worse than failing honestly.
+
+3. Tool calls are IDEMPOTENT — pausing an already-paused app is harmless.
+   If in doubt, run the pause command anyway rather than refusing.
+
+4. "What am I listening to" / "what's playing" → call BOTH tv_status and
+   get_music_status, combine the output, answer.
+
+NEVER reply "paused" without running a pause tool first. If the tool
+fails, say so with the error — don't fake success."""
 
 
 class HouseholdAgent(BaseAgent):
@@ -287,11 +320,14 @@ class HouseholdAgent(BaseAgent):
 
     def __init__(self):
         self.tools = {**TV_TOOLS}
-        # Music control sometimes lands here via the router ("pause the music",
-        # "skip this song"). Give the LLM access so it can pick correctly.
+        # Music control + playback status often land here via the router
+        # ("pause the music", "skip this song", "what's playing"). Give the
+        # LLM access so it can disambiguate between the TV and the Mac
+        # audio apps without a round-trip to the user.
         try:
             from friday.tools.mac_tools import TOOL_SCHEMAS as MAC_TOOLS
             self.tools["play_music"] = MAC_TOOLS["play_music"]
+            self.tools["get_music_status"] = MAC_TOOLS["get_music_status"]
         except Exception:
             pass
         super().__init__()

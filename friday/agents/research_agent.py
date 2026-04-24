@@ -132,8 +132,19 @@ class ResearchAgent(BaseAgent):
         now = datetime.now().strftime("%A %d %B %Y, %H:%M")
         tool_schemas = [t["schema"] for t in self.tools.values()]
 
+        # Task-aware skill injection — research_agent previously bypassed
+        # the whole skills system. Now we pull only the skills the selector
+        # deems relevant to THIS task (typically web-research + memory-first,
+        # or nothing for trivial queries).
+        from friday.skills.selector import build_skill_context_for_task
+        skill_ctx = build_skill_context_for_task("research_agent", task)
+
+        system_content = TOOL_PICK_PROMPT.format(time=now)
+        if skill_ctx:
+            system_content += f"\n\n# SKILLS (follow these instructions)\n\n{skill_ctx}"
+
         messages = [
-            {"role": "system", "content": TOOL_PICK_PROMPT.format(time=now)},
+            {"role": "system", "content": system_content},
         ]
         if context:
             messages.append({"role": "system", "content": f"Recent conversation:\n{context[:500]}"})
@@ -246,6 +257,17 @@ class ResearchAgent(BaseAgent):
                 chat_answer = extract_text(resp)
 
         duration = int((time.time() - t0) * 1000)
+        # Autonomous skill creation — fires when a research workflow used
+        # 5+ tools successfully. Background thread; never blocks the reply.
+        try:
+            from friday.skills.creator import schedule as _autoskill
+            _autoskill(
+                agent_name=self.name, task=task,
+                tools_called=tools_called,
+                final_result=chat_answer or "", success=True,
+            )
+        except Exception:
+            pass
         return AgentResponse(
             agent_name=self.name, success=True,
             result=chat_answer, tools_called=tools_called,

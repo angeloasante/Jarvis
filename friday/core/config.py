@@ -68,10 +68,14 @@ MODEL_NAME = "qwen3.5:9b"       # All tasks — reliable tool calling (8/8 accur
 
 _explicit_key   = os.getenv("CLOUD_API_KEY", "")
 _openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
-# Google AI Studio (aistudio.google.com) — distinct from GOOGLE_API_KEY which
-# is reserved for the Gmail / Calendar OAuth flow. Get a free AI Studio key
-# at https://aistudio.google.com/app/apikey.
-_google_ai_key  = os.getenv("GOOGLE_AI_STUDIO_KEY", "") or os.getenv("GEMINI_API_KEY", "")
+# Google AI Studio is intentionally NOT in the default chain. Gemma on AI
+# Studio rejects system-role messages, and Gemini 2.5 Flash refuses
+# dual-use OSINT work on "helpful and harmless" grounds — so it's useless
+# as a fallback for FRIDAY's investigation path. Opt back in with
+# FRIDAY_USE_GOOGLE_AI_STUDIO=true if you want it for non-OSINT agents.
+_google_ai_key  = ""
+if os.getenv("FRIDAY_USE_GOOGLE_AI_STUDIO", "").lower() == "true":
+    _google_ai_key = os.getenv("GOOGLE_AI_STUDIO_KEY", "") or os.getenv("GEMINI_API_KEY", "")
 _groq_key       = os.getenv("GROQ_API_KEY", "")
 
 # Per-provider default models — Gemma where available, Qwen3 on Groq
@@ -136,9 +140,18 @@ for prov_name, prov_key in (
 
 # ElevenLabs TTS (cloud streaming voice)
 # Set ELEVENLABS_API_KEY in .env to enable. Falls back to local Kokoro if unset.
+# Two separate model configs because live streaming and one-shot voice notes
+# have different latency/quality trade-offs:
+#   - Live streaming voice pipeline → Flash v2.5 (~75ms TTFB, minimal emotion)
+#   - Voice notes on Telegram / offline rendering → Eleven v3 (expressive,
+#     supports inline audio tags like [laughs], [whispers], [excited])
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb").strip("/")  # "George" — warm male
-ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5")  # ~75ms latency, best for real-time
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "lxYfHSkYm1EzQzGhdbfc").strip("/")
+# Live-streaming model (used by friday/voice/pipeline.py for speaker playback).
+ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5")
+# Expressive model for generated voice notes / audio files. Slower than flash
+# but supports audio tags for emotion. Used by friday/tools/voice_tools.py.
+ELEVENLABS_EXPRESSIVE_MODEL = os.getenv("ELEVENLABS_EXPRESSIVE_MODEL", "eleven_v3")
 USE_CLOUD_TTS = bool(ELEVENLABS_API_KEY)
 
 # Memory

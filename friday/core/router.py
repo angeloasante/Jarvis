@@ -11,8 +11,19 @@ as explicit params so FridayCore can call them without coupling.
 import re
 import logging
 from datetime import datetime
+from importlib.util import find_spec
 
 from friday.core.config import USE_CLOUD
+
+
+def _has_investigation_agent() -> bool:
+    """True when the private investigation_agent module is present on disk.
+
+    The file is gitignored, so public repo clones won't have it and routing
+    should skip every investigation-specific pattern silently. We check once
+    via ``importlib.util.find_spec`` without actually importing (cheap).
+    """
+    return find_spec("friday.agents.investigation_agent") is not None
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +174,8 @@ def classify_intent(
             "system_agent", "household_agent", "monitor_agent", "briefing_agent",
             "job_agent", "social_agent", "cron_agent", "deep_research_agent",
         }
+        if _has_investigation_agent():
+            valid_agents.add("investigation_agent")
 
         if text in valid_agents:
             return (text, user_input.strip())
@@ -251,6 +264,19 @@ def match_agent(
         r"\b(send|text|message)\s+.+\s+(on |via |through )?(whatsapp|wa)\b",
         r"\b(check|read|show|get)\s+(my |the )?(whatsapp|wa)\b",
         r"\bwhatsapp\b",
+        # Telegram — the rich-media channel. "send me X on telegram",
+        # "telegram me the report", "send it to my telegram".
+        r"\b(send|shoot|forward|drop|text|push)\s+(?:me\s+|it\s+|that\s+|this\s+|them\s+)?"
+        r".{0,80}?\s+(on |to |via |through )\s*(my\s+)?telegram\b",
+        r"\btelegram\s+(me|it|that|this)\b",
+        r"\b(send|put)\s+(it|this|that|these|them)\s+(on|to|in)\s+(my\s+)?telegram\b",
+        r"\btelegram\b",
+        # Voice notes — ElevenLabs TTS → Telegram voice bubble.
+        # "send me a voice note saying X", "voice note me X", "tell me X in
+        # a voice note".
+        r"\bvoice\s*note\b",
+        r"\b(send|shoot)\s+(?:me\s+)?(?:a\s+)?voice\s*(note|message|memo)\b",
+        r"\b(tell|say)\s+.+(in|as)\s+(a\s+)?voice\s*note\b",
         # FaceTime
         r"\b(facetime|face\s*time)\s+\S",
         r"\b(call|ring|phone)\s+\S.+\b(on )?(facetime|face\s*time)\b",
@@ -339,6 +365,23 @@ def match_agent(
     s_no_urls = re.sub(r'https?://\S+', '', s).strip()
     if any(re.search(p, s_no_urls) for p in monitor_patterns):
         return ("monitor_agent", raw)
+
+    # ── Investigation / OSINT (optional — only if investigation_agent is loaded) ──
+    investigation_patterns = [
+        r"\b(background check|osint|due diligence|investigate|investigation)\s+(on|into|about)\b",
+        r"\brun\s+(an?\s+)?(osint|background|investigation|check)\b",
+        r"\b(companies house|director|officer)\s+(search|lookup|appointments)\b",
+        r"\b(has|did)\s+.{3,30}\s+(go|gone)\s+bankrupt\b",
+        r"\b(gazette|insolvency register|disqualification)\b",
+        r"\bwhois\s+\S",
+        r"\b(wayback|web archive|archive\.org)\b",
+        r"\b(have i been pwned|breach check|email breach)\b",
+        r"\b(crimes?|crime rate|stop and search)\s+(near|around|at|in)\b",
+        r"\b(look up|lookup|search for).+on\s+(companies house|gazette)\b",
+        r"\b(is|who runs|who owns|who's behind)\s+\S+\.(com|co\.uk|org|net|io|ai|dev|uk)\b",
+    ]
+    if _has_investigation_agent() and any(re.search(p, s) for p in investigation_patterns):
+        return ("investigation_agent", raw)
 
     # ── Job / CV ──
     job_patterns = [

@@ -416,7 +416,7 @@ Rules:
 - Steps in the SAME phase run in PARALLEL (fast)
 - Steps in LATER phases wait for earlier ones (dependencies)
 - Always include 4-8 SEARCH steps with 2-3 queries each for thorough coverage
-- If the task mentions reading a file, include a READ_FILE step in phase 1
+- ONLY include a READ_FILE step if the user EXPLICITLY provides a file path they want read (e.g. "read my thesis at ~/Documents/thesis.md", "improve the file at /Users/.../draft.docx"). Never invent a file to read. Writing a NEW report does NOT require READ_FILE — start with SEARCH.
 - SEARCH queries should be specific and diverse — cover different angles
 - sections list = the final document structure (in order)
 - Do NOT include "Introduction", "Conclusion", "Summary", or "Abstract" in the sections list — those are generated automatically by the synthesis step"""
@@ -491,8 +491,19 @@ class DeepResearchAgent:
         # ── Step 1: Plan (1 LLM call) ──
         _status("Planning task structure...")
 
+        # Task-aware skill injection — the planner benefits from skills
+        # like web-research, marketing-strategy, job-analysis when the
+        # topic calls for them. Injected once; downstream section writers
+        # inherit via the approved plan.
+        from friday.skills.selector import build_skill_context_for_task
+        skill_ctx = build_skill_context_for_task("deep_research_agent", task)
+
+        planner_system = PLANNER_PROMPT
+        if skill_ctx:
+            planner_system += f"\n\n# SKILLS (follow these instructions)\n\n{skill_ctx}"
+
         plan_messages = [
-            {"role": "system", "content": PLANNER_PROMPT},
+            {"role": "system", "content": planner_system},
             {"role": "user", "content": task},
         ]
         plan_response = cloud_chat(messages=plan_messages, max_tokens=1200)
@@ -795,6 +806,18 @@ class DeepResearchAgent:
             if len(document) > 2000:
                 on_chunk(f"\n\n... (full document at {save_path})")
 
+        # Autonomous skill creation — deep research typically has 5+ tool
+        # calls, so almost every successful run seeds a new skill candidate.
+        # Dedup + embedding similarity keep the library from exploding.
+        try:
+            from friday.skills.creator import schedule as _autoskill
+            _autoskill(
+                agent_name=self.name, task=task,
+                tools_called=tools_called,
+                final_result=summary or "", success=True,
+            )
+        except Exception:
+            pass
         return AgentResponse(
             agent_name=self.name,
             success=True,
@@ -802,6 +825,7 @@ class DeepResearchAgent:
             data={"path": str(save_path), "document_length": len(document)},
             tools_called=tools_called,
             duration_ms=duration,
+            media_paths=[str(save_path)],
         )
 
     async def _execute_search(self, queries: list, tools_called: list) -> str:

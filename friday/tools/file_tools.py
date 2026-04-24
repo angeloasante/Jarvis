@@ -228,6 +228,15 @@ async def search_files(
         extensions = set(file_types) if file_types else None
         results = []
 
+        # Normalise query so spaces / underscores / dashes are equivalent
+        # for filename matching — filenames in FRIDAY's output dirs are
+        # slugged ("richard_asante_…") but the LLM usually searches with
+        # spaces ("Richard Asante").
+        def _norm(s: str) -> str:
+            import re as _re
+            return _re.sub(r"[\s_\-]+", "_", s.lower())
+        q_norm = _norm(query)
+
         for fp in base.rglob("*"):
             if not fp.is_file():
                 continue
@@ -239,9 +248,10 @@ async def search_files(
             matched = False
             match_context = None
 
-            # Name search
+            # Name search — try raw + normalised forms
             if search_type in ("name", "both"):
-                if query.lower() in fp.name.lower():
+                name_lower = fp.name.lower()
+                if query.lower() in name_lower or q_norm in _norm(fp.name):
                     matched = True
                     match_context = "filename match"
 
