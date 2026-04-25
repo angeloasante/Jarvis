@@ -137,6 +137,7 @@ Every major subsystem has its own doc. Read the ones relevant to what you're doi
 | Improvement mode | [docs/improvement-mode.md](docs/improvement-mode.md) | Correction capture, task-aware skill selection, self-improving patterns |
 | Screen vision | [docs/screen-vision.md](docs/screen-vision.md) | OCR + VLM + page solver → `.docx` |
 | Gesture control | [docs/gesture-control.md](docs/gesture-control.md) | 29 MediaPipe gestures, Iron-Man pinch drag |
+| Voice pipeline | [docs/voice-pipeline.md](docs/voice-pipeline.md) | Engineering deep-dive — VAD/STT/trigger/streaming TTS, latency budget, anti-feedback |
 | Personality | [docs/user-config.md](docs/user-config.md) | `~/Friday/user.json` — name, bio, tone, slang, CV |
 | Tech stack | [docs/tech-stack.md](docs/tech-stack.md) | Every dep with version + why it was chosen |
 | LLM providers | [docs/llm-providers.md](docs/llm-providers.md) | OpenRouter, Groq, Anthropic, any OpenAI-compatible, Ollama |
@@ -159,7 +160,7 @@ Each one is a one-shot wizard. Paste your API key (or log in via OAuth) and it's
 | **ElevenLabs TTS** | `friday setup elevenlabs` | Cloud voice (~75ms live, Eleven v3 with audio tags for voice notes). Optional — Kokoro runs locally if you skip. | [docs/setup-voice.md](docs/setup-voice.md) |
 | **X (Twitter)** | `friday setup x` | Post, mentions, search, retweets, likes | — |
 | **WhatsApp** | see guide | Read/send WhatsApp via local Baileys bridge | [docs/whatsapp-setup.md](docs/whatsapp-setup.md) |
-| **Voice** | `friday setup voice` | Always-on ambient listen, wake word "Friday" | [docs/setup-voice.md](docs/setup-voice.md) |
+| **Voice** | `friday setup voice` | Always-on ambient listen, wake word "Friday". Engineering deep-dive in [docs/voice-pipeline.md](docs/voice-pipeline.md). | [docs/setup-voice.md](docs/setup-voice.md) |
 | **Gestures** | `friday setup gestures` | Camera-based hand control, 29 gestures | [docs/gesture-control.md](docs/gesture-control.md) |
 
 Run `friday doctor` any time to see which integrations are live and which aren't.
