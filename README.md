@@ -153,7 +153,8 @@ Each one is a one-shot wizard. Paste your API key (or log in via OAuth) and it's
 | **OpenRouter** *(recommended LLM)* | `friday setup openrouter` | Widest model selection, free tier, live model picker | [docs/setup-openrouter-groq.md](docs/setup-openrouter-groq.md) |
 | **Groq** *(fastest LLM)* | `friday setup groq` | Sub-100ms latency, ~500 tok/s | [docs/setup-openrouter-groq.md](docs/setup-openrouter-groq.md) |
 | **Ollama** *(local LLM)* | see guide | Fully local inference, privacy, offline | [docs/ollama-setup.md](docs/ollama-setup.md) |
-| **Tavily** *(web search)* | `friday setup tavily` | Agent-optimised web search, research + briefings | [docs/setup-tavily.md](docs/setup-tavily.md) |
+| **Tavily** *(web search — primary)* | `friday setup tavily` | Agent-optimised web search, research + briefings | [docs/setup-tavily.md](docs/setup-tavily.md) |
+| **Firecrawl** *(web search fallback + scrape)* | `friday setup firecrawl` | Auto-fallback when Tavily caps out; also upgrades fetch_page output. 500 free credits, no card. | — |
 | **Gmail + Calendar** | `friday setup gmail` | Read/search/draft/send mail, calendar events — bundled OAuth, just sign in | [docs/setup-google.md](docs/setup-google.md) |
 | **Twilio SMS** | `friday setup twilio` | Text FRIDAY from any phone, outbound SMS | [docs/sms-setup.md](docs/sms-setup.md) |
 | **Telegram** | `friday setup telegram` | Second channel, 50 MB/file rich media, voice notes with audio-tag emotion (Eleven v3), cross-channel SMS → Telegram delivery of docs/images/voice. No tunnel, free. | [docs/telegram.md](docs/telegram.md) |

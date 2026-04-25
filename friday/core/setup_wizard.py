@@ -222,11 +222,19 @@ def doctor() -> int:
         "logged in" if GOOGLE_TOKEN.exists() else "run `friday setup gmail`"
     ))
 
-    # Tavily (web search)
+    # Tavily (web search — primary)
     has_tavily = bool(env.get("TAVILY_API_KEY") or os.environ.get("TAVILY_API_KEY"))
     rows.append(_check(
-        "Tavily (web search)", has_tavily,
+        "Tavily (web search — primary)", has_tavily,
         "configured" if has_tavily else "run `friday setup tavily`"
+    ))
+
+    # Firecrawl (web search + scrape — fallback)
+    has_firecrawl = bool(env.get("FIRECRAWL_API_KEY") or os.environ.get("FIRECRAWL_API_KEY"))
+    rows.append(_check(
+        "Firecrawl (web search fallback + scrape)", has_firecrawl,
+        "configured" if has_firecrawl
+        else "optional — run `friday setup firecrawl` (500 free credits)"
     ))
 
     # Twilio
@@ -686,6 +694,21 @@ def setup_tavily() -> int:
         key_hint="tvly-…",
         blurb="Web search used by the research agent. Free tier covers normal use.",
         prefix="tvly-",
+    )
+
+
+def setup_firecrawl() -> int:
+    return _simple_key_setup(
+        service="Firecrawl",
+        url="https://www.firecrawl.dev/app/api-keys",
+        env_var="FIRECRAWL_API_KEY",
+        key_hint="fc-…",
+        blurb=(
+            "Search + scrape fallback for the research agent. Used "
+            "automatically when Tavily plan caps out. Also upgrades "
+            "fetch_page output quality. 500 free credits — no card."
+        ),
+        prefix="fc-",
     )
 
 
@@ -1509,6 +1532,7 @@ _SETUP_COMMANDS: dict[str, Callable[[], int]] = {
     "gemma":      setup_gemma,
     "groq":       setup_groq,
     "tavily":     setup_tavily,
+    "firecrawl":  setup_firecrawl,
     "elevenlabs": setup_elevenlabs,
     "x":          setup_x,
     "twilio":     setup_twilio,
