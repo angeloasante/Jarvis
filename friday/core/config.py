@@ -92,11 +92,41 @@ _DEFAULTS = {
     "groq":       ("https://api.groq.com/openai/v1",                                  "qwen/qwen3-32b"),
 }
 
+# Primary-provider override. When set, that provider goes first regardless
+# of normal key-priority order. Useful for: temporarily pinning to Groq
+# while OpenRouter is daily-capped, or pinning to OpenRouter while testing
+# Gemma quality. Other configured providers still appear in the fallback
+# chain below.
+#   FRIDAY_PRIMARY_PROVIDER=groq        → force Groq primary
+#   FRIDAY_PRIMARY_PROVIDER=openrouter  → force OpenRouter primary
+#   FRIDAY_PRIMARY_PROVIDER=auto / unset → key-priority order (default)
+_pin = os.getenv("FRIDAY_PRIMARY_PROVIDER", "").strip().lower()
+if _pin in ("auto", ""):
+    _pin = ""
+
+def _try_pin(name: str, key: str):
+    """Return (key, base, model, provider_name) if this pin is usable."""
+    if _pin == name and key:
+        return key, _DEFAULTS[name][0], _DEFAULTS[name][1], name
+    return None
+
+_pinned = (
+    _try_pin("groq",       _groq_key)
+    or _try_pin("openrouter", _openrouter_key)
+    or _try_pin("google",  _google_ai_key)
+)
+
 if _explicit_key:
     CLOUD_API_KEY = _explicit_key
     CLOUD_BASE_URL = os.getenv("CLOUD_BASE_URL", "")
     CLOUD_MODEL_NAME = os.getenv("CLOUD_MODEL", "")
     _PRIMARY_PROVIDER = "explicit"
+elif _pinned:
+    CLOUD_API_KEY, CLOUD_BASE_URL, CLOUD_MODEL_NAME, _PRIMARY_PROVIDER = _pinned
+    # When pinning, intentionally IGNORE the env CLOUD_MODEL override —
+    # it was usually set for a different provider (e.g.
+    # CLOUD_MODEL=google/gemma-4-31b-it:free is OpenRouter-flavoured but
+    # nonsense to Groq). Use the pinned provider's native default.
 elif _openrouter_key:
     CLOUD_API_KEY = _openrouter_key
     CLOUD_BASE_URL = os.getenv("CLOUD_BASE_URL", _DEFAULTS["openrouter"][0])

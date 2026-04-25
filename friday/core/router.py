@@ -136,20 +136,35 @@ HARD RULES (these override everything above):
 7. "short report / quick summary / brief overview" → research_agent (fast, saves files too). Only "detailed / comprehensive / in-depth / multi-section / paper" → deep_research_agent.
 8. Follow-ups about YOUR last response ("why did you say that", "what do you mean") → CHAT.
 9. Short confirmations ("yes", "do it", "go ahead"): if the previous message was an agent asking "should I continue?", route to THAT SAME agent. Otherwise CHAT.
-10. When uncertain between CHAT and an action agent → pick the action agent. The user asks FRIDAY to DO things.
+10. **Curiosity / general-knowledge questions are CHAT, not research.** "Why is the sky blue", "what is photosynthesis", "who was Einstein", "explain quantum tunnelling" — the user is having a conversation, not asking FRIDAY to fetch and write a report. Route those to CHAT. Only pick research_agent when the user explicitly asks for a search, a write-up, fetched URLs, current/news data, or a saved file.
+11. When uncertain between CHAT and an action agent — for *transactional* requests (do/send/open/control), pick the action agent. For *conversational* requests (why/what/how/explain), pick CHAT.
 
 Respond with ONLY the agent name (lowercase, with _agent suffix) or "CHAT". Nothing else. No explanation.
 
 Current time: {time}"""
 
 
+# Sentinel returned by classify_intent when the LLM confidently says
+# "this is chat, no agent needed". Distinct from None (= classifier
+# errored / unavailable, caller should fall back).
+CHAT_DECISION = "__chat__"
+
+
 def classify_intent(
     user_input: str,
     conversation: list[dict],
-) -> tuple[str, str] | None:
-    """Use Groq LLM to classify intent in ~1s. Returns (agent_name, task) or None for chat.
+) -> tuple[str, str] | str | None:
+    """Use the cloud LLM to classify intent. Returns one of:
 
-    Only called when cloud is available. Falls back to match_agent() regex if this fails.
+      * ``(agent_name, task)``  — agent route, dispatch directly.
+      * ``CHAT_DECISION`` (str) — LLM is confident this is casual chat.
+                                  Caller MUST NOT fall through to regex.
+      * ``None``                — LLM errored / unavailable. Caller falls
+                                  back to ``match_agent`` regex.
+
+    The CHAT_DECISION return is the fix for over-routing: previously a
+    "chat" verdict was indistinguishable from "classifier broken" so the
+    regex layer would steal queries the LLM had correctly tagged as chat.
     """
     if not USE_CLOUD:
         return None
@@ -180,9 +195,12 @@ def classify_intent(
         if text in valid_agents:
             return (text, user_input.strip())
         if text == "chat":
-            return None  # Let fast_chat handle it
+            # Confident chat verdict — return sentinel so caller doesn't
+            # fall through to the regex layer.
+            return CHAT_DECISION
 
-        # Model returned something unexpected — fall through to regex
+        # Model returned something unexpected — None tells caller to retry
+        # with regex (which has its own broad-strokes guards).
         logger.debug(f"LLM classify returned unexpected: '{text}'")
         return None
 

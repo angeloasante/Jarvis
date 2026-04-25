@@ -160,7 +160,7 @@ Each one is a one-shot wizard. Paste your API key (or log in via OAuth) and it's
 | **ElevenLabs TTS** | `friday setup elevenlabs` | Cloud voice (~75ms live, Eleven v3 with audio tags for voice notes). Optional — Kokoro runs locally if you skip. | [docs/setup-voice.md](docs/setup-voice.md) |
 | **X (Twitter)** | `friday setup x` | Post, mentions, search, retweets, likes | — |
 | **WhatsApp** | see guide | Read/send WhatsApp via local Baileys bridge | [docs/whatsapp-setup.md](docs/whatsapp-setup.md) |
-| **Voice** | `friday setup voice` | Always-on ambient listen, wake word "Friday". Engineering deep-dive in [docs/voice-pipeline.md](docs/voice-pipeline.md). | [docs/setup-voice.md](docs/setup-voice.md) |
+| **Voice** | `friday setup voice` | Always-on ambient listen, wake word "Friday". Optional WebSocket input streaming (`FRIDAY_TTS_INPUT_STREAMING=true`) for token-by-token TTS. Engineering deep-dive in [docs/voice-pipeline.md](docs/voice-pipeline.md). | [docs/setup-voice.md](docs/setup-voice.md) |
 | **Gestures** | `friday setup gestures` | Camera-based hand control, 29 gestures | [docs/gesture-control.md](docs/gesture-control.md) |
 
 Run `friday doctor` any time to see which integrations are live and which aren't.

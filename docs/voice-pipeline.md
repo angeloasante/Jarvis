@@ -151,6 +151,74 @@ Effect: time-to-first-audio drops to roughly `STT + LLM_first_sentence + TTS_TTF
 
 `_strip_for_voice` at [`friday/voice/pipeline.py:72-83`](../friday/voice/pipeline.py#L72-L83) cleans each sentence before TTS — removes code blocks, URLs, file paths, markdown — so the spoken version doesn't include unspeakable garbage.
 
+### 3.1 Even tighter — input-streaming over WebSocket (opt-in)
+
+The HTTP `/stream` endpoint described above is one-shot in the **input** direction: we POST a complete sentence, then receive PCM bytes back. So even with sentence-batching, every reply pays one **"wait for the LLM to finish a sentence"** cost before TTS can fire.
+
+ElevenLabs has a separate WebSocket endpoint that lifts that constraint:
+
+```
+wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input
+```
+
+We push text fragments **as the LLM emits them**. ElevenLabs synthesises continuously and audio frames flow back without waiting for sentence boundaries.
+
+**Wired but gated** — see [`friday/voice/tts.py`'s `Speaker.speak_streaming()`](../friday/voice/tts.py) and [`friday/voice/pipeline.py`'s `_process_and_speak_streaming()`](../friday/voice/pipeline.py).
+
+```bash
+# Enable
+export FRIDAY_TTS_INPUT_STREAMING=true
+# In ~/Friday/.env:
+FRIDAY_TTS_INPUT_STREAMING=true
+```
+
+Architecture:
+
+```python
+# pipeline.py — token bridge from the orchestrator's CHUNK callback
+chunk_queue = queue.Queue()
+
+def _on_update(msg):
+    if msg.startswith("CHUNK:"):
+        chunk_queue.put(_strip_for_voice(msg[6:]) + " ")
+    elif msg.startswith("DONE:"):
+        chunk_queue.put(None)
+
+# tts.py — Speaker.speak_streaming runs two concurrent asyncio tasks:
+#   _send_loop:  pulls chunks from the queue → ws.send({"text": chunk})
+#   _recv_loop:  reads {"audio": base64-pcm} frames → OutputStream.write
+```
+
+When it pays off:
+
+| Configuration | First-audio latency |
+|---|---|
+| HTTP path, slow LLM (full sentence ~800 ms) | LLM_full_sentence + 75 ms = **~875 ms** |
+| WebSocket path, slow LLM (first word ~300 ms) | LLM_first_word + ~150 ms = **~450 ms** |
+| HTTP path, fast LLM (Groq Qwen3, full sentence ~250 ms) | 250 + 75 = **~325 ms** |
+| WebSocket path, fast LLM (first word ~80 ms) | 80 + ~150 = **~230 ms** |
+
+The WebSocket path **adds ~75 ms of TTFB cost** vs the HTTP path's ~75 ms, because connection setup + initial config message + chunk-length-schedule make the first audio frame arrive a bit later. So it only wins when LLM-to-first-word is *much* faster than LLM-to-full-sentence — i.e. with a fast LLM and longer outputs.
+
+When it loses:
+
+- **Slow LLM** (rate-limited primary cascading to fallback): you wait for the slow LLM regardless. The WebSocket can't synthesise faster than text arrives.
+- **Short replies** ("OK", "Done"): full sentence arrives so fast that the WebSocket's setup overhead dominates. The HTTP path wins by ~75 ms here.
+
+If `FRIDAY_TTS_INPUT_STREAMING=true` is set and the WebSocket fails to connect, the pipeline falls back to the HTTP path automatically — you'll see `⏱ WS streaming failed — falling back to HTTP` in the log. Local Kokoro stays as the offline fallback under both paths.
+
+**Generation tuning lives at [`friday/voice/tts.py`](../friday/voice/tts.py) in the `_runner` config message:**
+
+```python
+"generation_config": {
+    # When ElevenLabs decides it has enough text to start synthesising.
+    # Lower = more aggressive partial generation, lower TTFB.
+    # Higher = smoother prosody between fragments.
+    # [50, 90, 160, 210] is fairly snappy; bump if speech sounds chopped.
+    "chunk_length_schedule": [50, 90, 160, 210],
+}
+```
+
 ---
 
 ## 4. Anti-feedback: muting during TTS
@@ -243,6 +311,8 @@ Cloud-side knobs live in [`friday/core/config.py`](../friday/core/config.py):
 | `ELEVENLABS_VOICE_ID` | Voice for both live + voice notes |
 | `ELEVENLABS_MODEL` | Live-streaming model (Flash v2.5) |
 | `ELEVENLABS_EXPRESSIVE_MODEL` | Voice-note model (Eleven v3) — see [telegram.md](telegram.md#voice-notes-via-elevenlabs-v3) |
+| `FRIDAY_TTS_INPUT_STREAMING` | `true` enables WebSocket input streaming (§3.1). Default off. |
+| `FRIDAY_PRIMARY_PROVIDER` | Pin which LLM the pipeline calls — `groq`, `openrouter`, or `auto`. See [agents.md §4.9](agents.md). |
 
 ---
 
@@ -305,8 +375,12 @@ friday/voice/
 ├── config.py            # 42 lines — every magic number lives here
 ├── vad.py               # 59 lines — Silero wrapper, three-state machine
 ├── stt.py               # 47 lines — MLX Whisper wrapper + warmup
-├── tts.py               # 256 lines — Speaker class, ElevenLabs streaming + Kokoro fallback
-├── pipeline.py          # 597 lines — the daemon thread, ambient loop, trigger, dispatch
+├── tts.py               # ~410 lines — Speaker class:
+│                        #   ├ speak()           — HTTP /stream (one-shot input, streamed output)
+│                        #   └ speak_streaming() — WebSocket /stream-input (token-by-token in, audio out)
+├── pipeline.py          # ~680 lines — the daemon thread, ambient loop, trigger, dispatch:
+│                        #   ├ _process_and_speak()           — sentence-batched HTTP TTS
+│                        #   └ _process_and_speak_streaming() — chunk-streamed WS TTS (FRIDAY_TTS_INPUT_STREAMING=true)
 ├── response_filter.py   # 67 lines — strip code/markdown for spoken output
 ├── wake_word.py         # 47 lines — OpenWakeWord scaffolding (currently unused)
 └── cloud_stt.py         # 220 lines — ElevenLabs Scribe Realtime client (currently unused)

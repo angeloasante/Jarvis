@@ -411,7 +411,19 @@ class VoicePipeline:
                 tts_ms = (time.time() - t_tts) * 1000
                 console.print(f"  [dim]  ⏱ TTS: {tts_ms:.0f}ms[/dim]")
             else:
-                self._process_and_speak(contextualized_query, t_start)
+                # FRIDAY_TTS_INPUT_STREAMING=true → push tokens into the
+                # ElevenLabs WebSocket as the LLM emits them. No waiting
+                # for sentence boundaries before TTS fires.
+                import os as _os
+                if (_os.environ.get("FRIDAY_TTS_INPUT_STREAMING", "").lower() == "true"
+                        and self._tts._use_cloud):
+                    ok = self._process_and_speak_streaming(contextualized_query, t_start)
+                    if not ok:
+                        # WebSocket failed — fall back to sentence-batched HTTP
+                        console.print("  [dim yellow]  ⏱ WS streaming failed — falling back to HTTP[/dim yellow]")
+                        self._process_and_speak(contextualized_query, t_start)
+                else:
+                    self._process_and_speak(contextualized_query, t_start)
         except Exception as e:
             console.print(f"  [red]✗ Voice response error: {e}[/red]")
         finally:
@@ -439,6 +451,75 @@ class VoicePipeline:
     # ══════════════════════════════════════════════════════════════════════
     #  STREAMING TTS RESPONSE
     # ══════════════════════════════════════════════════════════════════════
+
+    def _process_and_speak_streaming(self, text: str, t_start: float = None) -> bool:
+        """Token-streaming path: LLM chunks pushed straight to ElevenLabs WS.
+
+        Eliminates the sentence-buffering wait of `_process_and_speak`. As
+        soon as the LLM emits its first word, that word is already on its
+        way to ElevenLabs. Audio flows back continuously without per-
+        sentence handshake cost.
+
+        Returns True on success, False if the WebSocket path failed (so
+        the caller can fall back to the HTTP-streamed sentence-batched
+        path which is more battle-tested).
+        """
+        if t_start is None:
+            t_start = time.time()
+
+        chunk_queue: queue.Queue = queue.Queue()
+        t_first_chunk = [None]
+        full_chunks: list[str] = []
+        header_printed = [False]
+
+        def _on_update(msg: str):
+            if msg.startswith("ACK:"):
+                console.print(f"  [dim green]◈ thinking...[/dim green]")
+            elif msg.startswith("STATUS:"):
+                console.print(f"  [dim green]  ◈ {msg[7:]}[/dim green]")
+            elif msg.startswith("CHUNK:"):
+                if t_first_chunk[0] is None:
+                    t_first_chunk[0] = time.time()
+                    llm_ms = (t_first_chunk[0] - t_start) * 1000
+                    console.print(f"  [dim]  ⏱ LLM first chunk: {llm_ms:.0f}ms[/dim]")
+                chunk = msg[6:]
+                full_chunks.append(chunk)
+                # Strip markdown / code on the way through. _strip_for_voice
+                # is line-aware so partial chunks pass through fine.
+                cleaned = _strip_for_voice(chunk)
+                if cleaned:
+                    if not header_printed[0]:
+                        console.print(f"  [bold green]FRIDAY[/bold green] ", end="")
+                        header_printed[0] = True
+                    chunk_queue.put(cleaned + " ")
+            elif msg.startswith("DONE:"):
+                chunk_queue.put(None)  # sentinel
+            elif msg.startswith("ERROR:"):
+                console.print(f"  [red]✗ LLM error: {msg[6:]}[/red]")
+                chunk_queue.put(None)
+
+        self.friday.dispatch_background(text, on_update=_on_update)
+
+        def _next_chunk():
+            """Blocking pull — called from the speak_streaming worker."""
+            try:
+                return chunk_queue.get(timeout=120)
+            except queue.Empty:
+                return None
+
+        def _log(line: str):
+            console.print(f"  [dim]{line}[/dim]")
+
+        ok = self._tts.speak_streaming(_next_chunk, log=_log)
+
+        # Stats
+        total = "".join(full_chunks)
+        elapsed = (time.time() - t_start) * 1000
+        console.print(
+            f"  [dim]  ⏱ Stream complete: {elapsed:.0f}ms | {len(total)} chars"
+            f"{'' if ok else ' (WS failed)'}[/dim]"
+        )
+        return ok
 
     def _process_and_speak(self, text: str, t_start: float = None):
         """Stream LLM → TTS with minimal gaps.

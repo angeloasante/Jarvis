@@ -47,6 +47,7 @@ from friday.core.prompts import (
 from friday.core.router import (
     classify_intent, match_agent, is_likely_chat, needs_agent as _needs_agent,
     recent_comms_context, extract_topic_from_conversation,
+    CHAT_DECISION,
 )
 from friday.core.fast_path import fast_path as _fast_path
 from friday.core.oneshot import try_oneshot as _try_oneshot
@@ -71,6 +72,15 @@ class FridayCore:
             "social_agent": SocialAgent(),
             "deep_research_agent": DeepResearchAgent(),
         }
+
+        # Optional private agents — only register if the module is present on
+        # disk. investigation_agent is gitignored and ships only on Travis's
+        # machine. Public clones skip this block silently.
+        try:
+            from friday.agents.investigation_agent import InvestigationAgent
+            self.agents["investigation_agent"] = InvestigationAgent()
+        except ImportError:
+            pass
         self.memory = get_memory_store()
         self.conversation: list[dict] = []
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -391,9 +401,31 @@ class FridayCore:
                 return
 
         # ── Priority 3: Agent dispatch ──
-        # LLM first (capability-aware classify prompt with hard rules, ~1s on
-        # Gemma 4). Regex fallback when cloud is offline.
-        match = classify_intent(user_input, self.conversation) or match_agent(user_input, self.conversation, self.memory)
+        # LLM router runs first. Verdicts:
+        #   - (agent_name, task) → confident agent route, dispatch
+        #   - CHAT_DECISION      → confident chat, skip regex
+        #   - None               → classifier errored or unsure
+        #
+        # The old code fell back to regex on None, which is what made
+        # "why is the sky blue" land in research_agent. Now: only fall
+        # back to regex if cloud is OFFLINE entirely (no LLM router
+        # available). Otherwise None is treated as "LLM was uncertain →
+        # default to chat", which is the safe path.
+        from friday.core.config import USE_CLOUD
+        llm_verdict = classify_intent(user_input, self.conversation)
+        if llm_verdict == CHAT_DECISION:
+            text = await self._fast_chat(user_input, _chunk)
+            return
+        if isinstance(llm_verdict, tuple):
+            match = llm_verdict
+        elif not USE_CLOUD:
+            # Cloud offline — regex is the only router we have.
+            match = match_agent(user_input, self.conversation, self.memory)
+        else:
+            # Cloud is up but classifier returned unexpected output.
+            # Trust the LLM's uncertainty and default to chat — this is
+            # the corrected behaviour (regex would over-route).
+            match = None
         if match:
             agent_name, task = match
             label = agent_name.replace("_agent", "")
