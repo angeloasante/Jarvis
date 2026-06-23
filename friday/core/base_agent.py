@@ -129,7 +129,21 @@ class BaseAgent:
             {"role": "system", "content": full_system},
         ]
         if context:
-            messages.append({"role": "system", "content": f"Context:\n{context}"})
+            # Frame the context so the agent KNOWS the previous tool output
+            # is already in scope. Without this nudge the agent sometimes
+            # re-fires the same tool ("search the web") on a follow-up
+            # question because the system prompts everywhere say "your
+            # first response must be a tool call". When the user asks a
+            # follow-up like "is this a fit / which projects resonate",
+            # the answer is in this Context block, not in a fresh search.
+            messages.append({"role": "system", "content": (
+                "Context — recent conversation and memory. The most recent "
+                "FRIDAY turn(s) include tool output (page text, job "
+                "listings, search results) the user is likely referring to. "
+                "ALWAYS read this before deciding to call a tool. If the "
+                "answer is in here, answer directly without re-fetching.\n\n"
+                f"{context}"
+            )})
         messages.append({"role": "user", "content": task})
 
         # Track file paths produced by tools (screenshots, PDFs, CVs, etc.)

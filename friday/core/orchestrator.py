@@ -57,6 +57,124 @@ from friday.core.briefing import (
 )
 
 
+# Keyword sets for the "is the LLM about to dispatch the wrong agent?"
+# safety net. If the user input contains NONE of the keywords matching
+# the picked agent's surface AND the input is a short reaction phrase,
+# downgrade the dispatch to chat.
+_AGENT_KEYWORDS: dict[str, set[str]] = {
+    "comms_agent": {
+        "email", "emails", "mail", "inbox", "gmail", "calendar",
+        "schedule", "meeting", "event", "imessage", "text", "texts",
+        "message", "messages", "whatsapp", "wa", "sms", "facetime",
+        "call", "ring", "phone", "contact", "draft", "reply", "send",
+        "shoot", "forward", "telegram", "voice note",
+    },
+    "household_agent": {
+        "tv", "telly", "television", "netflix", "youtube", "spotify",
+        "disney", "prime", "channel", "remote", "volume", "mute",
+        "screen", "hdmi",
+    },
+    "system_agent": {
+        "open", "launch", "close", "screenshot", "screen", "battery",
+        "ram", "cpu", "storage", "wifi", "bluetooth", "darkmode",
+        "url", "browser", "safari", "chrome", "pdf", "ocr",
+    },
+    "social_agent": {
+        "x", "twitter", "tweet", "post", "@", "mentions", "retweet",
+        "like", "follow",
+    },
+    "research_agent": {
+        "search", "google", "look", "find", "who", "what", "tell",
+        "research", "summarise", "summarize", "fetch", "url", "http",
+        "youtube", "video", "transcript",
+    },
+    "code_agent": {
+        "code", "script", "file", "function", "class", "git", "commit",
+        "push", "debug", "fix", "run", "deploy", "test", "build",
+    },
+    "job_agent": {
+        "job", "apply", "application", "cv", "resume", "linkedin",
+        "career", "role", "position", "interview",
+    },
+    "memory_agent": {
+        "remember", "recall", "memory", "memories", "remind",
+    },
+    "monitor_agent": {
+        "monitor", "watch", "track", "alert", "notify",
+    },
+    "briefing_agent": {
+        "brief", "briefing", "catch", "miss", "summary", "morning",
+        "update", "updates",
+    },
+    "investigation_agent": {
+        "background", "investigate", "investigation", "osint",
+        "companies house", "gazette", "insolvency", "whois",
+    },
+}
+
+# Reaction-phrase patterns — if the user said one of these, they're
+# almost certainly continuing a chat, not asking for a tool call.
+_REACTION_PREFIXES = (
+    "what are you talking", "what do you mean", "what?", "huh",
+    "wait", "hold on", "back up", "explain", "go on",
+    "really", "are you sure", "and?", "so?", "uh", "um",
+    "what now", "say that again", "come again",
+)
+
+
+def _is_likely_followup_chat(user_input: str, agent_name: str) -> bool:
+    """Safety-net for when the LLM router latches onto an agent based on
+    earlier conversation context rather than the actual current input."""
+    text = (user_input or "").strip().lower()
+    if not text:
+        return False
+    # Obvious reaction phrases — always chat.
+    for p in _REACTION_PREFIXES:
+        if text.startswith(p):
+            return True
+    # Short input (≤ 8 words) with NO keyword from the picked agent's
+    # surface → almost certainly the LLM was over-eager.
+    words = text.split()
+    if len(words) <= 8:
+        kw = _AGENT_KEYWORDS.get(agent_name, set())
+        # Strip punctuation when checking
+        import re as _re
+        normalized = _re.sub(r"[^\w\s]", " ", text)
+        tokens = set(normalized.split())
+        if not (tokens & kw):
+            return True
+    return False
+
+
+# ── Multi-task detection (routing upgrade, not an agent picker) ──────────────
+# These only decide whether to wake the multi-agent LLM router EARLY. A false
+# positive routes a single-task prompt to that router, which then emits one
+# dispatch_agent call and behaves normally — slightly slower, never wrong. So
+# unlike agent-picking regex, this can't misroute; worst case it costs latency.
+_SEQ_WORDS_RE = re.compile(
+    r"\b(then|afterwards?|after that|after you|once (?:you|it|that)(?:'s| is)? done|"
+    r"followed by|and then)\b", re.I)
+_JOIN_WORDS_RE = re.compile(
+    r"\b(and also|as well as|also (?:check|send|search|tell|find|text|email|do)|plus also)\b", re.I)
+# Background-check / OSINT sub-tasks → investigation_agent (used in _run_agents
+# to correct the router when it sends a background check to research_agent).
+_OSINT_TASK_RE = re.compile(
+    r"\b(background check|background investigation|osint|due diligence|"
+    r"digital footprint|investigate(?:\s+the)?\s+(?:person|individual|subject|background)|"
+    r"dig up (?:dirt|info) on)\b", re.I)
+
+_TASK_DOMAINS = [
+    re.compile(r"\b(search|google|look ?up|research|web|news|find out)\b", re.I),                  # web
+    re.compile(r"\b(text(?:ed|ing|s)?|messag\w*|imessage|whatsapp|telegram|email\w*|sms|dm|repl(?:y|ied|ies))\b", re.I),  # messaging
+    re.compile(r"\b(background check|osint|investigate|due diligence|dig up)\b", re.I),            # investigation
+    re.compile(r"\b(format|write[- ]?up|make a (?:doc|document|report|pdf|cv)|compile|draft)\b", re.I),  # doc
+    re.compile(r"\b(tv|telly|netflix|youtube|volume|mute|lights?|thermostat)\b", re.I),            # home
+    re.compile(r"\b(calendar|schedule|meeting|remind me|event|book)\b", re.I),                     # calendar
+    re.compile(r"\b(tweet|post|twitter)\b", re.I),                                                 # social
+    re.compile(r"\b(apply|job posting|cover letter|tailor my (?:cv|resume))\b", re.I),             # job
+]
+
+
 class FridayCore:
     def __init__(self):
         self.agents = {
@@ -88,6 +206,16 @@ class FridayCore:
         self._mem_processor.start()
         self._turn_start: float = 0  # set at beginning of each turn
         self._last_agent: str | None = None  # for confirmation routing ("yes" → re-dispatch)
+        # Pending promise — set when fast_chat says "I'll fetch X" but fires
+        # no tools. Holds (original_user_input, full_response, matched_span).
+        # Cleared when the next user input is acted on (whether confirm or
+        # something new).
+        self._pending_promise: tuple[str, str, str] | None = None
+        # Ground truth for the "did it actually do what it said?" verifier.
+        # Reset at the start of every turn; incremented whenever a real agent
+        # is dispatched. If a response CLAIMS action but this is still 0, the
+        # model lied → escalate and actually do the work.
+        self._actions_this_turn: int = 0
 
     def _log_and_append(self, user_input: str, response: str,
                         route: str, agent_name: str = None,
@@ -206,8 +334,76 @@ class FridayCore:
 
         text = "".join(full_text)
         self._log_and_append(user_input, text, route="fast_chat")
+
+        # Promise detection — fast_chat fired no tools, so if the response
+        # said "I'll fetch X" the system needs to escalate. Stash for the
+        # caller (process()) to act on.
+        from friday.core.promise_detector import detect_promise
+        promise_span = detect_promise(text)
+        if promise_span:
+            self._pending_promise = (user_input, text, promise_span)
+        else:
+            self._pending_promise = None
+
         self._mem_processor.process(user_input, text)
         return text
+
+    async def _escalate_promise(self, _chunk, _ack, _status, _media) -> bool:
+        """fast_chat said "I'll fetch X" but fired no tools — re-dispatch to
+        an agent that actually does the work. Returns True if an escalation
+        was performed.
+        """
+        if not self._pending_promise:
+            return False
+        # Ground-truth verification: if a real agent already ran this turn, the
+        # claim of action was TRUE — don't escalate (avoids re-doing work). We
+        # only escalate when the response claimed action AND nothing fired.
+        if self._actions_this_turn > 0:
+            self._pending_promise = None
+            return False
+        original_input, response_text, promise_span = self._pending_promise
+        self._pending_promise = None  # clear so we don't loop
+        log.info("⚠ lie guard: response claimed action but 0 agents ran — escalating to actually do it")
+
+        synth_task = (
+            f"User asked: \"{original_input}\". You replied: \"{response_text}\". "
+            f"You committed to action with: \"{promise_span}\". "
+            f"Now carry it out — call the tools required. Do not reply with "
+            f"words alone."
+        )
+
+        # Route via the LLM classifier; fall back to research_agent (web
+        # search + fetch_page) since most "I'll fetch X" promises are research.
+        llm_verdict = classify_intent(synth_task, self.conversation)
+        if isinstance(llm_verdict, tuple):
+            agent_name, task = llm_verdict
+        else:
+            agent_name, task = "research_agent", synth_task
+
+        label = agent_name.replace("_agent", "")
+        _ack(f"actually doing it — {label}")
+        _status(f"{label} working...")
+        streamed = {"any": False}
+        def _chunk_tracked(t):
+            streamed["any"] = True
+            _chunk(t)
+
+        result = await self._dispatch(
+            agent_name, task, original_input,
+            on_status=lambda m: _status(m),
+            on_chunk=_chunk_tracked,
+        )
+        response = result.result or "Couldn't carry that out."
+        self._log_and_append(
+            original_input, response, route="promise_escalation",
+            agent_name=agent_name, tools_called=result.tools_called,
+        )
+        if not streamed["any"]:
+            _chunk(response)
+        for path in getattr(result, "media_paths", []) or []:
+            _media(path)
+        self._mem_processor.process(original_input, response, agent_name)
+        return True
 
     # ── Briefing ─────────────────────────────────────────────────────────────
 
@@ -264,6 +460,7 @@ class FridayCore:
           5.   LLM routing    → full routing for ambiguous queries (4 LLM calls)
         """
         self._turn_start = time.monotonic()
+        self._actions_this_turn = 0   # ground truth for the lie verifier
         s = user_input.strip().lower()
 
         # ── SMS delivery flag ────────────────────────────────────────────────
@@ -352,6 +549,16 @@ class FridayCore:
             self._mem_processor.process(user_input, response_text, agent_name)
             return
 
+        # ── Priority 1.7: Multi-task → straight to the multi-agent router ──
+        # Prompts that clearly contain more than one task (sequenced like
+        # "background-check X then format it then telegram me", or independent
+        # like "search the web for X and check if Ellen texted") skip the
+        # single-task fast paths and go to the LLM router, which can fan out
+        # to several agents — in parallel or as dependency-ordered chains.
+        if self._looks_multi_task(s):
+            await self._run_multi_agent(user_input, _ack, _status, _chunk, route="multi_task")
+            return
+
         # ── Priority 2: One-shot tool calls (1 LLM call) ──
         oneshot = await _try_oneshot(
             s, user_input, self.conversation,
@@ -376,9 +583,36 @@ class FridayCore:
             # direct_dispatch logs its own tool calls via memory.log_agent_call
             return
 
-        # ── Priority 2.7: Short confirmations → re-dispatch to last agent ──
-        # "yes", "yeah", "go ahead" after an agent asked a follow-up question
-        if re.match(r"^(yes|yeah|yep|yh|ye|yea|go ahead|do it|sure|ok|okay|please|proceed|bet|say less|aight|ight)\s*[.!?]*$", s):
+        # ── Priority 2.7: Confirmations → re-dispatch the pending promise
+        # or re-dispatch to last agent ──
+        # Catches: "yes", "yeah", "do that", "yh do it", "go ahead and pull
+        # it", etc. Two re-dispatch targets in priority order:
+        #   1. self._pending_promise — set when fast_chat said "I'll fetch X"
+        #      but fired no tools. The promise context becomes the task.
+        #   2. self._last_agent — fallback when an agent asked a follow-up
+        #      and the user said yes.
+        from friday.core.promise_detector import is_confirmation
+        # Retry: "try again" / "run it again" / "do it again" → re-run the
+        # PREVIOUS real user task (not the literal phrase) through the full
+        # multi-agent router. Without this, "try again" used to hit fast_chat
+        # and produce a fake "I've queued a fresh run" with nothing running.
+        if re.match(r"^(try\s+again|retry|run\s+it\s+again|do\s+it\s+again|(?:go|run|try)\s+(?:it\s+)?again|once\s+more)\s*[.!?]*$", s):
+            prev_user = next(
+                (m["content"] for m in reversed(self.conversation)
+                 if m.get("role") == "user" and m.get("content", "").strip().lower() != s),
+                None,
+            )
+            if prev_user:
+                _ack("re-running it for real this time")
+                await self._run_multi_agent(prev_user, _ack, _status, _chunk, route="retry")
+                return
+
+        if is_confirmation(s):
+            if self._pending_promise:
+                # Convert the promise into action. Same path as the
+                # auto-escalation below, but driven by user confirmation.
+                if await self._escalate_promise(_chunk, _ack, _status, _media):
+                    return
             last_agent = self._last_agent
             if last_agent:
                 label = last_agent.replace("_agent", "")
@@ -413,8 +647,18 @@ class FridayCore:
         # default to chat", which is the safe path.
         from friday.core.config import USE_CLOUD
         llm_verdict = classify_intent(user_input, self.conversation)
+        # URL guardrail — inputs that contain a URL must NEVER go to chat.
+        # If the classifier returns CHAT_DECISION on a URL-containing input,
+        # it's wrong; force agent dispatch via the regex matcher which knows
+        # how to route "apply to <url>" / "fetch <url>" / "open <url>".
+        if re.search(r"https?://\S+", user_input):
+            if llm_verdict == CHAT_DECISION or llm_verdict is None:
+                regex_match = match_agent(user_input, self.conversation, self.memory)
+                if regex_match:
+                    llm_verdict = regex_match
         if llm_verdict == CHAT_DECISION:
             text = await self._fast_chat(user_input, _chunk)
+            await self._escalate_promise(_chunk, _ack, _status, _media)
             return
         if isinstance(llm_verdict, tuple):
             match = llm_verdict
@@ -426,6 +670,19 @@ class FridayCore:
             # Trust the LLM's uncertainty and default to chat — this is
             # the corrected behaviour (regex would over-route).
             match = None
+
+        # Safety net — when the LLM picks an agent but the input is a
+        # short reaction phrase with NO keywords related to that agent's
+        # surface, downgrade to chat. Catches the case where the model
+        # latched onto context from earlier turns and routed "what are
+        # you talking about?" into comms_agent.
+        if match and _is_likely_followup_chat(user_input, match[0]):
+            match = None
+        if match is None and not isinstance(llm_verdict, tuple):
+            # Fell through to chat for any of the reasons above.
+            text = await self._fast_chat(user_input, _chunk)
+            await self._escalate_promise(_chunk, _ack, _status, _media)
+            return
         if match:
             agent_name, task = match
             label = agent_name.replace("_agent", "")
@@ -459,51 +716,11 @@ class FridayCore:
         # ── Priority 4: Conversational fast chat (1 LLM, slim prompt) ──
         if is_likely_chat(s):
             text = await self._fast_chat(user_input, _chunk)
+            await self._escalate_promise(_chunk, _ack, _status, _media)
             return
 
-        # ── Priority 5: LLM routing fallback (4 LLM calls) ──
-        system_prompt = self._build_system_prompt(user_input)
-        messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(self.conversation[-12:])
-        messages.append({"role": "user", "content": user_input})
-
-        response = cloud_chat(messages=messages, tools=[DISPATCH_TOOL])
-        tool_calls = extract_tool_calls(response)
-
-        if not tool_calls:
-            text = extract_text(response)
-            self._log_and_append(user_input, text, route="llm_fallback_chat")
-            _chunk(text)
-            self._mem_processor.process(user_input, text)
-            return
-
-        # LLM chose an agent — full routing + synthesis path
-        agents = [tc["arguments"]["agent"].replace("_agent", "") for tc in tool_calls if tc["name"] == "dispatch_agent"]
-        _ack(f"checking with {', '.join(agents)}" if agents else "working on it")
-
-        agent_results = []
-        for tc in tool_calls:
-            if tc["name"] == "dispatch_agent":
-                agent_name = tc["arguments"]["agent"]
-                task = tc["arguments"]["task"]
-                label = agent_name.replace("_agent", "")
-                _status(f"{label} working...")
-                result = await self._dispatch(agent_name, task, user_input, on_status=lambda m: _status(m))
-                agent_results.append(result)
-
-        if agent_results:
-            _status("synthesizing...")
-            synth_text = []
-            for chunk in self.stream_synthesis(user_input, agent_results):
-                _chunk(chunk)
-                synth_text.append(chunk)
-            full_response = "".join(synth_text)
-            agent_names = ", ".join(agents) if agents else "agent"
-            self._mem_processor.process(user_input, full_response, agent_names)
-            return
-
-        text = extract_text(response)
-        _chunk(text)
+        # ── Priority 5: LLM routing fallback → multi-agent + synthesis ──
+        await self._run_multi_agent(user_input, _ack, _status, _chunk, route="llm_fallback")
 
     # ── Process methods (non-streaming, streaming, hybrid) ────────────────
 
@@ -516,7 +733,7 @@ class FridayCore:
         messages.extend(self.conversation[-20:])
         messages.append({"role": "user", "content": user_input})
 
-        response = cloud_chat(messages=messages, tools=[DISPATCH_TOOL])
+        response = cloud_chat(messages=messages, tools=[self._dispatch_tool()])
         tool_calls = extract_tool_calls(response)
 
         if not tool_calls:
@@ -524,13 +741,7 @@ class FridayCore:
             self._log_and_append(user_input, text, route="process_chat")
             return text
 
-        agent_results = []
-        for tc in tool_calls:
-            if tc["name"] == "dispatch_agent":
-                agent_name = tc["arguments"]["agent"]
-                task = tc["arguments"]["task"]
-                agent_result = await self._dispatch(agent_name, task, user_input)
-                agent_results.append(agent_result)
+        agent_results = await self._run_agents(tool_calls, user_input)
 
         if agent_results:
             synthesis = await self._synthesize(user_input, agent_results)
@@ -574,7 +785,7 @@ class FridayCore:
         if on_status:
             on_status("routing...")
 
-        response = cloud_chat(messages=messages, tools=[DISPATCH_TOOL])
+        response = cloud_chat(messages=messages, tools=[self._dispatch_tool()])
         tool_calls = extract_tool_calls(response)
 
         if not tool_calls:
@@ -583,16 +794,7 @@ class FridayCore:
             yield text
             return
 
-        agent_results = []
-        for tc in tool_calls:
-            if tc["name"] == "dispatch_agent":
-                agent_name = tc["arguments"]["agent"]
-                task = tc["arguments"]["task"]
-                if on_status:
-                    label = agent_name.replace("_agent", "")
-                    on_status(f"{label} working...")
-                agent_result = await self._dispatch(agent_name, task, user_input, on_status=on_status)
-                agent_results.append(agent_result)
+        agent_results = await self._run_agents(tool_calls, user_input, on_status=on_status)
 
         if agent_results:
             if on_status:
@@ -610,6 +812,206 @@ class FridayCore:
 
     # ── Agent dispatch ────────────────────────────────────────────────────────
 
+    # Max specialist agents running concurrently in one prompt. Mirrors
+    # Hermes' default max_concurrent_children=3 (we allow a touch more).
+    _MAX_PARALLEL_AGENTS = 4
+
+    def _dispatch_tool(self) -> dict:
+        """DISPATCH_TOOL with the agent enum bound to THIS install's registered
+        agents — so optional ones (investigation_agent, gitignored and
+        Travis-only) become dispatchable when present and never appear when
+        absent. Reuses DISPATCH_TOOL's description + depends_on schema.
+        """
+        import copy
+        tool = copy.deepcopy(DISPATCH_TOOL)
+        tool["function"]["parameters"]["properties"]["agent"]["enum"] = sorted(self.agents.keys())
+        return tool
+
+    def _looks_multi_task(self, s: str) -> bool:
+        """Cheap heuristic: does this prompt contain more than one task?
+
+        Used ONLY to upgrade a prompt to the multi-agent router early — never
+        to choose an agent. Strong signal = explicit sequencing/joining words
+        ('then', 'and also', 'as well as'). Softer signal = two distinct task
+        domains joined by 'and'/comma. Either way the LLM router makes the real
+        call, so a false positive just costs a little latency.
+        """
+        if len(s.split()) < 6:
+            return False
+        if _SEQ_WORDS_RE.search(s) or _JOIN_WORDS_RE.search(s):
+            return True
+        if " and " in s or ", " in s:
+            hits = sum(1 for pat in _TASK_DOMAINS if pat.search(s))
+            if hits >= 2:
+                return True
+        return False
+
+    async def _run_multi_agent(self, user_input: str, _ack, _status, _chunk, route: str = "multi_agent") -> None:
+        """Full LLM-router → multi-agent (parallel/sequential) → synthesis path.
+
+        The dispatch tool's enum is built from the live agent registry, and the
+        router may emit several dispatch_agent calls with optional depends_on —
+        _run_agents executes them in parallel or as dependency-ordered chains.
+        """
+        system_prompt = self._build_system_prompt(user_input)
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(self.conversation[-12:])
+        messages.append({"role": "user", "content": user_input})
+
+        response = cloud_chat(messages=messages, tools=[self._dispatch_tool()])
+        tool_calls = extract_tool_calls(response)
+
+        if not tool_calls:
+            text = extract_text(response)
+            self._log_and_append(user_input, text, route=f"{route}_chat")
+            _chunk(text)
+            self._mem_processor.process(user_input, text)
+            return
+
+        agents = [tc["arguments"]["agent"].replace("_agent", "")
+                  for tc in tool_calls if tc.get("name") == "dispatch_agent"]
+        _ack(f"checking with {', '.join(agents)}" if agents else "working on it")
+
+        agent_results = await self._run_agents(tool_calls, user_input, on_status=lambda m: _status(m))
+
+        if agent_results:
+            _status("synthesizing...")
+            synth_text = []
+            for chunk in self.stream_synthesis(user_input, agent_results):
+                _chunk(chunk)
+                synth_text.append(chunk)
+            agent_names = ", ".join(agents) if agents else "agent"
+            self._mem_processor.process(user_input, "".join(synth_text), agent_names)
+            return
+
+        _chunk(extract_text(response))
+
+    async def _run_agents(self, tool_calls: list, user_input: str, on_status=None) -> list:
+        """Execute dispatched agents with dependency-aware parallelism.
+
+        The router emits one ``dispatch_agent`` call per agent. Each call may
+        carry ``depends_on`` — a list of agent names whose output it needs
+        first. We run them in topological waves:
+
+          • Agents with no unmet dependencies run CONCURRENTLY (asyncio.gather,
+            capped at _MAX_PARALLEL_AGENTS) — this is the parallel case
+            ("search the web" ∥ "check iMessages").
+          • An agent that depends on others waits for them, and receives their
+            output threaded into its task — this is the sequential chain case
+            ("background check" → "format doc" → "send Telegram"). The old
+            sequential loop never passed outputs downstream; this does.
+
+        Returns the list of AgentResponse in completion order.
+        """
+        calls = []
+        for tc in tool_calls:
+            if tc.get("name") == "dispatch_agent":
+                args = tc.get("arguments", {}) or {}
+                if args.get("agent") and args.get("task"):
+                    calls.append({
+                        "agent": args["agent"],
+                        "task": args["task"],
+                        "depends_on": [d for d in (args.get("depends_on") or []) if d],
+                    })
+        if not calls:
+            return []
+
+        # Correction: a background-check / OSINT sub-task belongs to
+        # investigation_agent, but the router LLM often picks research_agent
+        # for it (research_agent is the "look things up" default and the
+        # private investigation_agent is under-described). Force the right
+        # agent deterministically — same rule as the single-route short-circuit.
+        if "investigation_agent" in self.agents:
+            for c in calls:
+                if c["agent"] != "investigation_agent" and _OSINT_TASK_RE.search(c["task"]):
+                    log.info("rerouting %s → investigation_agent (OSINT task)", c["agent"])
+                    # remap any dependency references to the old name too
+                    old = c["agent"]
+                    c["agent"] = "investigation_agent"
+                    for other in calls:
+                        other["depends_on"] = ["investigation_agent" if d == old else d
+                                               for d in other["depends_on"]]
+
+        # Safety net: the prompt clearly sequences ("...then...then...") but the
+        # router emitted the agents with NO depends_on (model forgot). Infer a
+        # chain in emission order so the outputs actually flow forward instead
+        # of all firing in parallel against nothing. Only kicks in when the
+        # prompt has explicit sequencing language and nobody declared a dep.
+        if len(calls) > 1 and not any(c["depends_on"] for c in calls):
+            if _SEQ_WORDS_RE.search((user_input or "").lower()):
+                for i in range(1, len(calls)):
+                    calls[i]["depends_on"] = [calls[i - 1]["agent"]]
+                log.info("inferred sequential chain from prompt wording (router omitted depends_on)")
+
+        # Single agent → skip all the orchestration machinery.
+        if len(calls) == 1:
+            c = calls[0]
+            log.info("dispatch → %s (single): %s", c["agent"], c["task"][:70])
+            if on_status:
+                on_status(f"{c['agent'].replace('_agent', '')} working...")
+            t0 = time.monotonic()
+            res = await self._dispatch(c["agent"], c["task"], user_input, on_status=on_status)
+            log.info("  ✓ %s done in %.1fs (success=%s)", c["agent"],
+                     time.monotonic() - t0, getattr(res, "success", "?"))
+            return [res]
+
+        # Log the execution plan: which agents, and the parallel/chain shape.
+        chained = [c for c in calls if c["depends_on"]]
+        shape = "sequential chain" if chained else "parallel"
+        log.info("dispatch plan (%s) — %d agents:", shape, len(calls))
+        for c in calls:
+            dep = f"  ← after {', '.join(c['depends_on'])}" if c["depends_on"] else "  (independent)"
+            log.info("   • %-20s %s | %s", c["agent"], dep, c["task"][:60])
+
+        sem = asyncio.Semaphore(self._MAX_PARALLEL_AGENTS)
+        results_by_agent: dict = {}   # agent_name -> AgentResponse
+        ordered: list = []
+        done: set = set()
+        remaining = list(calls)
+
+        async def _run_one(call):
+            # Thread dependency outputs into this agent's task so a chain
+            # actually carries information forward.
+            task = call["task"]
+            dep_ctx = ""
+            for dep in call["depends_on"]:
+                r = results_by_agent.get(dep)
+                if r and getattr(r, "result", None):
+                    dep_ctx += f"\n\n[Output from {dep.replace('_agent','')}]:\n{r.result}"
+            if dep_ctx:
+                task = f"{task}\n\nUse this prior context to do your part:{dep_ctx}"
+            if on_status:
+                on_status(f"{call['agent'].replace('_agent', '')} working...")
+            t0 = time.monotonic()
+            log.info("  ▶ %s started%s", call["agent"],
+                     f" (using {', '.join(call['depends_on'])} output)" if call["depends_on"] else "")
+            async with sem:
+                res = await self._dispatch(call["agent"], task, user_input, on_status=on_status)
+            log.info("  ✓ %s done in %.1fs (success=%s)", call["agent"],
+                     time.monotonic() - t0, getattr(res, "success", "?"))
+            return call["agent"], res
+
+        # Topological wave execution.
+        wave_n = 0
+        while remaining:
+            ready = [c for c in remaining if all(d in done for d in c["depends_on"])]
+            if not ready:
+                # Unsatisfiable deps (cycle or names that were never dispatched)
+                # — run whatever's left in parallel rather than deadlock.
+                ready = list(remaining)
+            wave_n += 1
+            log.info("wave %d → running %d concurrently: %s", wave_n, len(ready),
+                     ", ".join(c["agent"] for c in ready))
+            wave = await asyncio.gather(*[_run_one(c) for c in ready])
+            for agent_name, res in wave:
+                results_by_agent[agent_name] = res
+                ordered.append(res)
+                done.add(agent_name)
+            for c in ready:
+                remaining.remove(c)
+
+        return ordered
+
     async def _dispatch(self, agent_name: str, task: str, original_input: str, on_status=None, on_chunk=None) -> AgentResponse:
         """Dispatch to a specialist agent."""
         agent = self.agents.get(agent_name)
@@ -620,6 +1022,8 @@ class FridayCore:
                 result=f"Unknown agent: {agent_name}",
                 error="agent_not_found",
             )
+        # Ground truth: a real agent is about to run this turn.
+        self._actions_this_turn += 1
 
         def on_tool_call(tool_name, tool_args):
             if on_status:
@@ -720,7 +1124,13 @@ class FridayCore:
                     label = f"reading {domain}"
                 on_status(label)
 
-        # Build context: memory + recent conversation
+        # Build context: memory + recent conversation. Per-message slice is
+        # asymmetric — user turns are usually short questions (300 is fine),
+        # but assistant turns carry the previous tool output (job listings,
+        # page text, search results) that the next turn often needs to
+        # reason against. Truncating those to 300 chars made follow-ups
+        # like "is this a fit / which projects resonate with the role"
+        # hallucinate because the actual job description had been cut.
         memory_context = self.memory.build_context(query=original_input)
         conv_context = ""
         if self.conversation:
@@ -730,7 +1140,8 @@ class FridayCore:
             user_role = USER.display_name
             for msg in recent:
                 role = user_role if msg["role"] == "user" else "FRIDAY"
-                conv_lines.append(f"{role}: {msg['content'][:300]}")
+                cap = 300 if msg["role"] == "user" else 2000
+                conv_lines.append(f"{role}: {msg['content'][:cap]}")
             conv_context = "Recent conversation:\n" + "\n".join(conv_lines)
 
         context = f"{memory_context}\n\n{conv_context}".strip()

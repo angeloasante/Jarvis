@@ -47,6 +47,11 @@ job_agent — AUTONOMOUSLY APPLIES TO JOBS
     • "look at this job posting and apply"
     • "read the job on my screen and make a CV"
     • anything involving submitting a job application end-to-end
+    • FIT QUESTIONS — "do I qualify for [role]", "am I a fit for [role]",
+      "would you recommend [role] for me", "which of my projects fit
+      this role", "should I apply for [role]", "what do you think of
+      this job for me". The agent grounds the answer in the user's
+      real GitHub repos — research_agent CANNOT do that.
   NOT for: general research about a company (that's research_agent).
 
 system_agent — CONTROLS THE MAC
@@ -60,19 +65,21 @@ system_agent — CONTROLS THE MAC
     • "navigate to [URL]"
     • "read this PDF" / "solve the questions on this page"
   NOT for: things about the TV (that's household_agent).
+  NOT for: SENDING anything anywhere — email/iMessage/SMS/WhatsApp/Telegram all go to comms_agent. "Send it on Telegram" is NEVER "open the Telegram app"; comms_agent has the actual bot.
 
 household_agent — CONTROLS THE TV AND SMART HOME
   Can: turn LG TV on/off, change volume, mute, launch apps on TV (Netflix, YouTube, Spotify, Disney+, Prime), pause/play, change channel, screen off, smart home devices.
   Use for ANY request involving the TV, telly, television, lounge/living room screen.
 
 comms_agent — HANDLES ALL COMMUNICATION
-  Can: read/search/send Gmail, read/create calendar events, read/send iMessages, start FaceTime calls, search contacts, read/send WhatsApp (via local bridge), send/read SMS (via Twilio), draft/edit/send email drafts.
+  Can: read/search/send Gmail, read/create calendar events, read/send iMessages, start FaceTime calls, search contacts, read/send WhatsApp (via local bridge), send/read SMS (via Twilio), draft/edit/send email drafts, AND send anything via FRIDAY's TELEGRAM BOT (text, document, photo, voice note, audio, video — up to 50 MB per file).
   Use for:
     • email ("check my emails", "draft an email", "send it")
     • calendar ("what's on my calendar", "book a meeting")
     • messages ("text Mom", "reply to <contact nickname>", "check my whatsapp")
     • FaceTime ("call Dad", "facetime my brother")
     • SMS ("sms me", "text my twilio number")
+    • Telegram ("send it on Telegram", "telegram me the doc", "send X to my Telegram") — this means SEND VIA THE BOT, NEVER "open the Telegram desktop app".
 
 social_agent — X / TWITTER
   Can: post tweets, reply, quote-tweet, like, retweet, search X, read mentions, look up @users.
@@ -101,6 +108,18 @@ research_agent — WEB RESEARCH + SHORT WRITE-UPS
     • "write a SHORT / QUICK / BRIEF report/summary/overview on [topic]" (even with "save to desktop")
     • background info on a company (NOT applying — that's job_agent)
   This is the FAST path (~10-20s). Prefer this over deep_research_agent unless user asks for depth.
+  NOT for: "background check on [person]" / "OSINT" / "due diligence on [person]" — that's investigation_agent.
+
+investigation_agent — OSINT / BACKGROUND CHECKS ON PEOPLE
+  Can: structured OSINT workflow against a named person — surfaces public profiles (LinkedIn, X, GitHub, company filings), employer/role triangulation, public-record cross-checks, social-media footprint, news mentions. Returns a structured dossier, not a single web-search summary.
+  Use for:
+    • "run a background check on [name]"
+    • "OSINT on [name]"
+    • "due diligence on [person]"
+    • "investigate [name] — works at [company]"
+    • "what do we know about [person at company]"
+  NOT for: background info on a company (research_agent), or research on a topic / idea (research_agent / deep_research_agent).
+  This is the ONLY route for any verb pattern "background check / OSINT / investigate / due diligence" applied to a named human.
 
 code_agent — FILES AND CODE
   Can: read/write files, run terminal commands, git operations, build/test code, save generated content to disk.
@@ -134,10 +153,12 @@ HARD RULES (these override everything above):
 5. X / Twitter / tweet / @username → social_agent. Always.
 6. Device stats (battery/RAM/CPU/storage) → system_agent, NEVER research_agent.
 7. "short report / quick summary / brief overview" → research_agent (fast, saves files too). Only "detailed / comprehensive / in-depth / multi-section / paper" → deep_research_agent.
-8. Follow-ups about YOUR last response ("why did you say that", "what do you mean") → CHAT.
+8. Follow-ups about YOUR last response → CHAT. This includes: "why did you say that", "what do you mean", "what are you talking about", "wait what", "huh?", "explain", "back up", "really?", "are you sure", "go on", "and?", "what?", "so?". A short reaction phrase from the user is ALWAYS chat, even if your previous response happened to mention contacts / messages / mail / calendar — the user is reacting to YOU, not asking for a tool call.
 9. Short confirmations ("yes", "do it", "go ahead"): if the previous message was an agent asking "should I continue?", route to THAT SAME agent. Otherwise CHAT.
 10. **Curiosity / general-knowledge questions are CHAT, not research.** "Why is the sky blue", "what is photosynthesis", "who was Einstein", "explain quantum tunnelling" — the user is having a conversation, not asking FRIDAY to fetch and write a report. Route those to CHAT. Only pick research_agent when the user explicitly asks for a search, a write-up, fetched URLs, current/news data, or a saved file.
 11. When uncertain between CHAT and an action agent — for *transactional* requests (do/send/open/control), pick the action agent. For *conversational* requests (why/what/how/explain), pick CHAT.
+12. **Background checks / OSINT / due diligence on a NAMED PERSON → investigation_agent. ALWAYS.** "Run a background check on [name]", "OSINT on [name]", "investigate [name]", "due diligence on [person]" — these are NEVER research_agent. They have a dedicated structured-OSINT workflow. The agent description matters more than what looks like a generic web question.
+13. **"Send X on/via/through/to Telegram" → comms_agent. ALWAYS.** comms_agent owns the Telegram bot (send_telegram_document / _photo / _voice / _video). NEVER system_agent. "Send" is the verb that matters — system_agent is for OPENING the Telegram app, which is not what the user wants when they say "send it to me". If they explicitly say "open Telegram on my Mac" then that's system_agent.
 
 Respond with ONLY the agent name (lowercase, with _agent suffix) or "CHAT". Nothing else. No explanation.
 
@@ -168,6 +189,27 @@ def classify_intent(
     """
     if not USE_CLOUD:
         return None
+
+    # Short-circuit: "background check on [name]", "OSINT on [name]",
+    # "due diligence on [name]", etc. are deterministic investigation_agent
+    # routes. Skip the LLM hop entirely — these patterns are unambiguous
+    # and the LLM router has historically misrouted them to research_agent.
+    if _has_investigation_agent():
+        s = user_input.strip().lower()
+        # Strong 2-word phrases — bail without preposition required
+        if re.search(r"\b(background check|osint|due diligence)\b", s):
+            return ("investigation_agent", user_input.strip())
+        # Verb forms with prepositions
+        if re.search(r"\b(investigate|investigation)\s+(on|into|about)\b", s):
+            return ("investigation_agent", user_input.strip())
+        # "investigate [Proper Noun]" — bare verb + a name (capitalized)
+        if re.search(r"\b(investigate|look into)\s+(this\s+)?(person|guy|woman|man|name|name of|on|into|about)?\s*\b[A-Z]", user_input):
+            return ("investigation_agent", user_input.strip())
+        # "run an X / dig up on Y"
+        if re.search(r"\brun\s+(an?\s+)?(osint|background check|investigation|due diligence)\b", s):
+            return ("investigation_agent", user_input.strip())
+        if re.search(r"\bdig\s+(up|into)\b.{0,40}\b(on|about)\b", s):
+            return ("investigation_agent", user_input.strip())
 
     try:
         from friday.core.llm import cloud_chat, extract_text
@@ -416,6 +458,10 @@ def match_agent(
         r"\b(cv|resume|cover letter|apply|job).+(screen|page|on my|i'?m on)\b",
         r"\b(open|go to).+(career|job|hiring|vacancy|vacancies)\b",
         r"\bcareer\s*(page|section|link|site)\b",
+        # ATS URLs — when the user pastes a job-board URL, route to
+        # job_agent. Covers Greenhouse, Lever, Ashby, Workable, Workday,
+        # SmartRecruiters, Jobvite, BambooHR, iCIMS, Pinpoint.
+        r"https?://(?:[\w.-]+\.)?(?:greenhouse\.io|lever\.co|ashbyhq\.com|workable\.com|myworkdayjobs\.com|smartrecruiters\.com|jobvite\.com|bamboohr\.com|icims\.com|pinpointhq\.com|jobs\.[\w.-]+)",
     ]
     if any(re.search(p, s) for p in job_patterns):
         return ("job_agent", raw)

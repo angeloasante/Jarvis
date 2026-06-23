@@ -183,8 +183,33 @@ class VoicePipeline:
         self._transcript: list[_Segment] = []
         self._transcript_lock = threading.Lock()
 
-        # Pause transcription during TTS to prevent feedback
+        # Hard-mute flag — only used by /listening-off. TTS playback no
+        # longer mutes the mic; barge-in detection is always on.
         self._muted = False
+
+        # Response runs on its OWN thread so the audio loop stays alive
+        # during TTS playback. Without this, the loop blocks inside
+        # _tts.speak() and barge-in detection never gets a frame to look
+        # at — talking over FRIDAY would do nothing.
+        self._response_thread: threading.Thread | None = None
+
+        # Barge-in is always on. While FRIDAY is speaking, the mic stays
+        # open and a stricter VAD pass watches for the user to talk over.
+        # On confirmed speech we call self._tts.stop() and process the new
+        # utterance. FOUR guards stack to prevent false triggers from TTS
+        # echo, TV in the background, and other ambient speech:
+        self._tts_playing: bool = False        # set by _respond, read by audio loop
+        self._tts_started_at: float = 0.0      # grace-period anchor
+        self._barge_in_speech_frames: int = 0  # consecutive high-conf frames
+        # Tunables — adjust if your mic/speaker setup misfires:
+        self._barge_in_grace_s: float = 0.4     # ignore mic for first 400ms of TTS
+        self._barge_in_threshold: float = 0.92  # Silero confidence (was 0.85 — too loose)
+        self._barge_in_min_frames: int = 12     # ~384ms of sustained speech to confirm
+        # Energy gate — TV / radio / room conversation through speakers
+        # tends to score 200-800 RMS at the laptop mic; direct user
+        # speech scores 2000-10000+. Filters background talk that Silero
+        # would otherwise treat as speech.
+        self._barge_in_min_energy: float = 1000.0
 
         # Follow-up window — after FRIDAY responds, treat next speech as directed
         # at FRIDAY for N seconds without needing trigger word again
@@ -304,6 +329,7 @@ class VoicePipeline:
             dtype="int16", blocksize=FRAME_SIZE,
         ) as stream:
             while self._running:
+                # Hard mute (legacy path or /listening-off) — drop frames.
                 if not self._listening or self._muted:
                     time.sleep(0.1)
                     continue
@@ -311,6 +337,47 @@ class VoicePipeline:
                 chunk, _ = stream.read(FRAME_SIZE)
                 audio = chunk[:, 0] if chunk.ndim > 1 else chunk
 
+                # ── Barge-in path ───────────────────────────────────────
+                # While TTS is playing, run a stricter VAD pass. Four
+                # guards stack: grace period, Silero confidence ≥ 0.92,
+                # 12 sustained frames (~384ms), AND a minimum audio
+                # energy so TV / background voices through speakers
+                # don't trip it (those score loud enough on Silero but
+                # are quiet at the mic vs direct user speech).
+                if self._tts_playing:
+                    grace = time.time() - self._tts_started_at
+                    if grace < self._barge_in_grace_s:
+                        continue
+                    # Energy gate first — cheapest, filters most ambient.
+                    energy = float(np.sqrt(
+                        np.mean(audio.astype(np.float32) ** 2)
+                    ))
+                    if energy < self._barge_in_min_energy:
+                        self._barge_in_speech_frames = 0
+                        continue
+                    prob = self._vad.speech_prob(audio)
+                    if prob >= self._barge_in_threshold:
+                        self._barge_in_speech_frames += 1
+                        if self._barge_in_speech_frames >= self._barge_in_min_frames:
+                            console.print(
+                                f"\n  [bold yellow]⚡ Barge-in — stopping FRIDAY[/bold yellow] "
+                                f"[dim](energy={energy:.0f}, prob={prob:.2f})[/dim]"
+                            )
+                            self._tts.stop()
+                            self._tts_playing = False
+                            self._barge_in_speech_frames = 0
+                            # Seed the buffer with the speech we already heard
+                            audio_buffer = [audio.copy()]
+                            has_speech = True
+                            self._vad.reset()
+                    else:
+                        # Not strong enough — reset the barge-in counter
+                        # so a single loud frame doesn't accumulate over
+                        # minutes of TTS playback
+                        self._barge_in_speech_frames = 0
+                    continue
+
+                # ── Normal path: VAD-driven capture ──────────────────────
                 state = self._vad.feed(audio)
 
                 if state == "speech":
@@ -344,6 +411,29 @@ class VoicePipeline:
     #  TRIGGER — "Friday" detected in transcript
     # ══════════════════════════════════════════════════════════════════════
 
+    def _start_response(self, query: str, ambient_context: str = "") -> None:
+        """Run _respond on a worker thread so the audio loop stays free.
+
+        If a response is already in flight (user just barged in, or two
+        utterances arrived in quick succession), interrupt the existing
+        TTS and wait briefly for the old worker to wind down before
+        starting the new one.
+        """
+        if self._response_thread and self._response_thread.is_alive():
+            # User is barging in / re-asking. Interrupt current TTS.
+            try:
+                self._tts.stop()
+            except Exception:
+                pass
+            self._response_thread.join(timeout=2.0)
+        self._response_thread = threading.Thread(
+            target=self._respond,
+            args=(query, ambient_context),
+            daemon=True,
+            name="friday-voice-response",
+        )
+        self._response_thread.start()
+
     def _on_triggered(self, trigger_text: str, match: re.Match):
         """FRIDAY was addressed — extract query, build context, respond."""
         after_trigger = trigger_text[match.end():].strip()
@@ -367,20 +457,23 @@ class VoicePipeline:
         console.print(f"\n  [bold cyan]🎤 {speaker_label}:[/bold cyan] [cyan]{trigger_text}[/cyan]")
         _play_chime()
 
-        self._respond(query, ambient_context)
+        self._start_response(query, ambient_context)
 
     def _on_followup(self, text: str):
         """Speech within follow-up window — treat as directed at FRIDAY."""
         ambient_context = self._build_ambient_context()
         console.print(f"\n  [bold cyan]🎤 {_voice_speaker_label()}:[/bold cyan] [cyan]{text}[/cyan]")
         _play_chime()
-        self._respond(text, ambient_context)
+        self._start_response(text, ambient_context)
 
     def _respond(self, query: str, ambient_context: str = ""):
         """Send query to FRIDAY and speak the response."""
         t_start = time.time()
-        # Mute mic during response
-        self._muted = True
+        # Mark TTS playback active so the audio loop runs the strict-VAD
+        # barge-in pass instead of the normal capture flow.
+        self._tts_playing = True
+        self._tts_started_at = time.time()
+        self._barge_in_speech_frames = 0
         try:
             speaker_label = _voice_speaker_label()
             contextualized_query = query
@@ -430,6 +523,8 @@ class VoicePipeline:
             total_ms = (time.time() - t_start) * 1000
             console.print(f"  [dim]  ⏱ Total: {total_ms:.0f}ms[/dim]")
             self._muted = False
+            self._tts_playing = False
+            self._barge_in_speech_frames = 0
             self._last_response_time = time.time()
 
     def _build_ambient_context(self) -> str:

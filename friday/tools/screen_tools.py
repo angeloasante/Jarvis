@@ -1054,7 +1054,14 @@ TOOL_SCHEMAS = {
         "fn": ocr_screen,
         "schema": {
             "name": "ocr_screen",
-            "description": "Extract all text from the screen using Apple Vision OCR. Takes a screenshot and reads all visible text. Fast, offline, no model needed.",
+            "description": (
+                "Apple Vision OCR over the WHOLE Mac screen. Use for "
+                "native macOS apps (Notes, Preview, Mail.app, terminals). "
+                "DO NOT use for browser content — when the user says 'on "
+                "my browser', 'this tab', 'the page', use "
+                "browser_ext_get_active_tab instead (reads DOM directly, "
+                "way more accurate than OCR'ing rendered HTML)."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1075,10 +1082,13 @@ TOOL_SCHEMAS = {
                 "internally, then uses a vision model to answer the question. "
                 "PICK THIS (not take_screenshot) whenever the user wants to know "
                 "WHAT's on screen: 'what's on my screen', 'describe what you see', "
-                "'take a screenshot and tell me what apps are open', 'what am I "
-                "looking at', 'what's this error'. Handles code reading, app "
-                "identification, UI explanation, error diagnosis. Do NOT call "
-                "take_screenshot first — this does it internally."
+                "'take a screenshot and tell me what apps are open', 'what's this "
+                "error'. Handles code reading, app identification, UI explanation, "
+                "error diagnosis. Do NOT call take_screenshot first — this does it "
+                "internally. "
+                "DO NOT use for browser content — when the user says 'on my "
+                "browser', 'this tab', 'the page i'm on', 'what i'm reading', use "
+                "browser_ext_get_active_tab (reads DOM directly, way more accurate)."
             ),
             "parameters": {
                 "type": "object",
@@ -1144,7 +1154,15 @@ TOOL_SCHEMAS = {
         "fn": read_screen,
         "schema": {
             "name": "read_screen",
-            "description": "Read all text content from the screen. General-purpose screen reader — reads job postings, articles, documents, forms, anything visible. Returns clean text with UI chrome stripped. Use this to understand what's on screen before taking action.",
+            "description": (
+                "OCR/vision read of the WHOLE Mac screen — for native apps "
+                "(Notes, Preview, Mail.app, terminals) or when the user "
+                "literally says 'on my screen'. "
+                "DO NOT use this when the user says 'on my browser', 'in chrome', "
+                "'this tab', 'the page i'm on' — that's a browser request. Use "
+                "browser_ext_get_active_tab instead, which reads the live DOM "
+                "directly and is far more accurate than OCR over the rendered page."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

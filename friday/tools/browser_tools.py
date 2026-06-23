@@ -688,7 +688,13 @@ async def browser_back() -> ToolResult:
 
 
 async def browser_upload(ref: str, file_path: str) -> ToolResult:
-    """Upload a file to a file input by @ref or CSS selector."""
+    """Upload a file to a file input by @ref or CSS selector.
+
+    Handles the common Ashby/Greenhouse/Lever pattern where the visible
+    "Upload File" button is a <button> and the real <input type=file> is
+    hidden. If the resolved ref isn't a file input, walk the DOM to find
+    the nearest hidden file input and upload there.
+    """
     try:
         page = await _get_page()
 
@@ -698,18 +704,69 @@ async def browser_upload(ref: str, file_path: str) -> ToolResult:
                 message=f"File not found: {file_path}",
                 severity=Severity.LOW, recoverable=False))
 
+        # Try the direct path first
+        async def _try_direct():
+            if ref.startswith("@e"):
+                locator = await _resolve_ref(page, ref)
+                if not locator:
+                    return False, "ref_not_found"
+                try:
+                    await locator.set_input_files(file_path, timeout=5000)
+                    return True, None
+                except Exception as e:
+                    return False, str(e)
+            else:
+                try:
+                    await page.set_input_files(ref, file_path, timeout=5000)
+                    return True, None
+                except Exception as e:
+                    return False, str(e)
+
+        ok, err = await _try_direct()
+        if ok:
+            return ToolResult(success=True, data={"uploaded": file_path, "to": ref})
+
+        # Direct path failed — likely a hidden file input behind a button.
+        # Strategy 1: find a sibling/descendant input[type=file] near the ref.
         if ref.startswith("@e"):
             locator = await _resolve_ref(page, ref)
-            if not locator:
-                return ToolResult(success=False, error=ToolError(
-                    code=ErrorCode.NOT_FOUND,
-                    message=f"Ref {ref} not found.",
-                    severity=Severity.LOW, recoverable=True))
-            await locator.set_input_files(file_path, timeout=10000)
-        else:
-            await page.set_input_files(ref, file_path, timeout=10000)
+            if locator:
+                # Look in the ref's nearest form/section ancestor for a hidden file input
+                for xpath in [
+                    "xpath=ancestor::*[1]//input[@type='file']",
+                    "xpath=ancestor::*[2]//input[@type='file']",
+                    "xpath=ancestor::*[3]//input[@type='file']",
+                ]:
+                    try:
+                        nearby = locator.locator(xpath)
+                        if await nearby.count():
+                            await nearby.first.set_input_files(file_path, timeout=5000)
+                            return ToolResult(success=True, data={
+                                "uploaded": file_path,
+                                "to": ref,
+                                "via": "nearby_hidden_input",
+                            })
+                    except Exception:
+                        continue
 
-        return ToolResult(success=True, data={"uploaded": file_path, "to": ref})
+        # Strategy 2: fall back to the only/first file input on the page
+        try:
+            page_inputs = page.locator("input[type='file']")
+            count = await page_inputs.count()
+            if count >= 1:
+                await page_inputs.first.set_input_files(file_path, timeout=5000)
+                return ToolResult(success=True, data={
+                    "uploaded": file_path,
+                    "to": ref,
+                    "via": f"page_file_input_first_of_{count}",
+                })
+        except Exception:
+            pass
+
+        return ToolResult(success=False, error=ToolError(
+            code=ErrorCode.COMMAND_FAILED,
+            message=f"Upload failed: {err or 'no file input found near {ref}'}",
+            severity=Severity.MEDIUM, recoverable=True))
     except Exception as e:
         return ToolResult(success=False, error=ToolError(
             code=ErrorCode.COMMAND_FAILED,
@@ -718,10 +775,25 @@ async def browser_upload(ref: str, file_path: str) -> ToolResult:
 
 
 async def browser_fill_form(fields: dict) -> ToolResult:
-    """Fill multiple form fields in one call. Keys are @refs or CSS selectors.
+    """Fill multiple form fields in one call. Type-aware — dispatches the
+    right Playwright action based on the element's role:
+
+    - textbox / searchbox / combobox (text-only) → .fill(value)
+    - checkbox → .check() if value is truthy, .uncheck() otherwise
+    - radio → .check() if value is truthy
+    - button → .click() — for Yes/No segmented controls (Ashby, etc.).
+      The agent passes the BUTTON's @ref (Yes button or No button), value
+      is treated as intent confirmation.
+    - listbox / combobox-with-listbox / select → click to open + click
+      the option matching the value
+    - file input → use browser_upload instead, this returns an error.
 
     Args:
-        fields: Dict of ref/selector → value. E.g. {"@e3": "John", "@e5": "john@example.com"}
+        fields: Dict of ref/selector → value. E.g.
+            {"@e3": "John", "@e5": "john@example.com",
+             "@e22": "Yes",  # clicks button if @e22 is a button
+             "@e30": True,   # checks the checkbox
+             "@e44": "United Kingdom"}  # selects from dropdown
     """
     try:
         page = await _get_page()
@@ -731,13 +803,85 @@ async def browser_fill_form(fields: dict) -> ToolResult:
         for ref, value in fields.items():
             try:
                 if ref.startswith("@e"):
+                    entry = _ref_map.get(ref, {})
+                    role = entry.get("role", "")
                     locator = await _resolve_ref(page, ref)
-                    if locator:
-                        await locator.fill(str(value), timeout=10000)
-                        filled.append(ref)
-                    else:
+                    if not locator:
                         errors.append(f"{ref}: not found")
+                        continue
+
+                    sval = str(value) if value is not None else ""
+
+                    # Dispatch by role
+                    if role in ("checkbox",):
+                        truthy = bool(value) and sval.lower() not in ("false", "no", "0", "")
+                        if truthy:
+                            await locator.check(timeout=10000)
+                        else:
+                            await locator.uncheck(timeout=10000)
+                        filled.append(f"{ref}({role})")
+
+                    elif role in ("radio",):
+                        await locator.check(timeout=10000)
+                        filled.append(f"{ref}({role})")
+
+                    elif role in ("button",):
+                        # Yes/No segmented controls — clicking is the action.
+                        # Skip the click if the button name doesn't match the
+                        # value (prevents clicking "No" when user wants "Yes").
+                        btn_name = (entry.get("name") or "").strip().lower()
+                        sval_lower = sval.strip().lower()
+                        if sval_lower and btn_name and sval_lower != btn_name:
+                            errors.append(
+                                f"{ref}: button '{btn_name}' doesn't match "
+                                f"value '{sval}' — pick the ref for the "
+                                f"correct option button"
+                            )
+                            continue
+                        await locator.click(timeout=10000)
+                        filled.append(f"{ref}(button)")
+
+                    elif role in ("combobox", "listbox"):
+                        # Try native <select> first
+                        try:
+                            await locator.select_option(label=sval, timeout=3000)
+                            filled.append(f"{ref}(select)")
+                            continue
+                        except Exception:
+                            pass
+                        # Custom dropdown: click to open, then click matching option
+                        try:
+                            await locator.click(timeout=5000)
+                            await asyncio.sleep(0.3)
+                            opt = page.get_by_role("option", name=sval)
+                            if not await opt.count():
+                                opt = page.locator(f"role=option").filter(has_text=sval)
+                            if await opt.count():
+                                await opt.first.click(timeout=5000)
+                                filled.append(f"{ref}(combobox)")
+                            else:
+                                errors.append(f"{ref}: no option matching '{sval}'")
+                        except Exception as e:
+                            errors.append(f"{ref}: combobox open/select failed: {e}")
+
+                    elif role in ("textbox", "searchbox") or not role:
+                        # Default: text input
+                        await locator.fill(sval, timeout=10000)
+                        filled.append(f"{ref}({role or 'text'})")
+
+                    else:
+                        # Unknown role — try .fill() then .click() as fallback
+                        try:
+                            await locator.fill(sval, timeout=5000)
+                            filled.append(f"{ref}({role}-fill)")
+                        except Exception:
+                            try:
+                                await locator.click(timeout=5000)
+                                filled.append(f"{ref}({role}-click)")
+                            except Exception as e2:
+                                errors.append(f"{ref}({role}): {e2}")
                 else:
+                    # CSS selector — assume text input
                     await page.fill(ref, str(value), timeout=10000)
                     filled.append(ref)
             except Exception as e:

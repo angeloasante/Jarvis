@@ -48,25 +48,95 @@ async def tailor_cv(
     job_title: str,
     company: str,
     job_description: str,
+    new_summary: str,
+    lead_with: list[str],
+    bullet_additions: dict[str, list[str]] | None = None,
+    skills_priority: list[str] | None = None,
     emphasis: list[str] | None = None,
 ) -> ToolResult:
-    """Return the full CV data + tailoring context for the LLM to reason about.
+    """Build a tailored CV deterministically from small LLM deltas.
 
-    The agent uses this data to decide what to emphasise, reorder, or rephrase.
-    Actual tailoring happens in the agent's reasoning, not here.
+    The LLM only needs to emit ~5 small fields — a summary string, a list
+    of company names to lead with, optional bullet additions, optional
+    skill category order. The TOOL does the structural work (reorder,
+    merge, etc.) and stages the result so generate_pdf() picks it up
+    automatically (no args needed).
+
+    This is way more reliable than asking the model to emit a full 5 KB
+    CV dict as a tool argument — it avoids the "let me write Python in
+    chat output" failure mode.
 
     Args:
-        job_title: The role being applied for
-        company: Company name
-        job_description: Full or summarised job description
-        emphasis: Optional list of skills/experiences to highlight
+        job_title: The role being applied for.
+        company: Company name.
+        job_description: Full or summarised JD (truncated internally).
+        new_summary: The full new profile summary, written in the user's
+            voice. ~3-6 sentences. NOT a template — concrete proof of fit.
+        lead_with: Company names from base_cv.experience that should
+            appear FIRST, in priority order. Anything not listed keeps
+            its original order at the bottom. Use exact company strings
+            from the base CV.
+        bullet_additions: Optional. Map of company name → list of extra
+            bullets to APPEND (not replace) to that entry's highlights.
+            Use sparingly, only for the 1-2 lead entries.
+        skills_priority: Optional. Skill category names (e.g. "ai_ml",
+            "backend") in priority order. Unlisted categories follow.
+        emphasis: Optional. Skills/themes to highlight (informational).
     """
-    # Cache tailoring context so generate_pdf() can use it automatically
+    cv_data = deepcopy(CV)
+
+    # 1. Replace summary
+    cv_data["summary"] = new_summary
+
+    # 2. Reorder experience: lead_with first (in given order), rest after
+    base_exp = list(cv_data.get("experience") or [])
+    lead_lower = [c.strip().lower() for c in lead_with]
+    leads_with_idx: list[tuple[int, dict]] = []
+    rest: list[dict] = []
+    seen_lead_keys: set[str] = set()
+    for entry in base_exp:
+        key = (entry.get("company") or "").strip().lower()
+        if key in lead_lower and key not in seen_lead_keys:
+            leads_with_idx.append((lead_lower.index(key), entry))
+            seen_lead_keys.add(key)
+        else:
+            rest.append(entry)
+    leads_with_idx.sort(key=lambda x: x[0])
+    cv_data["experience"] = [e for _, e in leads_with_idx] + rest
+
+    # 3. Append bullet_additions to matching entries
+    if bullet_additions:
+        for company_key, extra_bullets in bullet_additions.items():
+            target = company_key.strip().lower()
+            for entry in cv_data["experience"]:
+                if (entry.get("company") or "").strip().lower() == target:
+                    existing = list(entry.get("highlights") or [])
+                    entry["highlights"] = existing + list(extra_bullets)
+                    break
+
+    # 4. Reorder skills if priority supplied
+    if skills_priority:
+        skills = cv_data.get("skills") or {}
+        if isinstance(skills, dict):
+            ordered: dict = {}
+            for cat in skills_priority:
+                if cat in skills:
+                    ordered[cat] = skills[cat]
+            for cat, vals in skills.items():
+                if cat not in ordered:
+                    ordered[cat] = vals
+            cv_data["skills"] = ordered
+
+    # 5. Empty projects (they live in experience now)
+    cv_data["projects"] = []
+
+    # Stage everything so generate_pdf() (no args) can pick it up
     _tailoring_context.update({
         "job_title": job_title,
         "company": company,
-        "job_description": job_description[:500],
+        "job_description": job_description[:1500],
         "emphasis": emphasis or [],
+        "built_cv": cv_data,
     })
 
     return ToolResult(
@@ -74,7 +144,13 @@ async def tailor_cv(
         data={
             "tailored": True,
             "target_role": f"{job_title} at {company}",
-            "note": "CV tailored. Now call generate_pdf() — it will automatically use the tailored context.",
+            "lead_entries": [e.get("role") for _, e in leads_with_idx],
+            "experience_count": len(cv_data["experience"]),
+            "note": (
+                "CV built and staged. Now call generate_pdf() with NO args "
+                "(or only filename) — the tool will use the staged tailored "
+                "CV automatically. Then proceed to PHASE 3 (fill form)."
+            ),
         },
     )
 
@@ -131,6 +207,29 @@ async def generate_pdf(
         cover_letter_text: Cover letter text (required if content_type is "cover_letter")
         filename: Optional filename. Auto-generated if not provided.
     """
+    # Mandatory tailoring guard — for a CV, the agent MUST have called
+    # tailor_cv (which stages a built_cv on _tailoring_context) OR pass
+    # tailored_cv explicitly. Otherwise we'd ship a generic untailored CV
+    # to a job application.
+    if content_type == "cv" and tailored_cv is None and not _tailoring_context.get("built_cv"):
+        return ToolResult(
+            success=False,
+            data=(
+                "Refused: tailor_cv() must be called first. Call tailor_cv("
+                "job_title, company, job_description, new_summary, "
+                "lead_with=[...]) — the tool builds the CV for you. Then "
+                "call generate_pdf() (no args needed)."
+            ),
+        )
+
+    # If tailor_cv staged a built_cv, use it as the tailored_cv automatically
+    # (so the agent doesn't need to re-emit a giant dict as a tool arg).
+    if tailored_cv is None and _tailoring_context.get("built_cv"):
+        tailored_cv = _tailoring_context["built_cv"]
+        # The tool already merged with base + applied transforms, so skip
+        # the post-merge safety net by signalling strict.
+        tailored_cv = {**tailored_cv, "_strict": True}
+
     # WeasyPrint needs Homebrew libs on macOS
     import platform
     if platform.system() == "Darwin":
@@ -141,21 +240,47 @@ async def generate_pdf(
 
     from weasyprint import HTML
 
-    cv_data = tailored_cv if tailored_cv else deepcopy(CV)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if tailored_cv:
+        # Merge partial tailored CV onto the base so missing keys (contact,
+        # education, certifications) still render. The agent only needs to
+        # send fields it actually customised — usually summary, experience,
+        # projects, skills.
+        cv_data = deepcopy(CV)
+        # _strict signals "I know exactly which entries I want; don't
+        # backfill from base." Used when intentionally narrowing a CV
+        # to a different domain (e.g. cleaning role uses only day-job
+        # entries, AI role uses only AI/founder entries).
+        strict = bool(tailored_cv.get("_strict"))
+        cv_data.update({k: v for k, v in tailored_cv.items() if v is not None and not k.startswith("_")})
 
-    # If tailor_cv was called, customize the summary for the target role
-    if not tailored_cv and _tailoring_context:
-        ctx = _tailoring_context
-        role = ctx.get("job_title", "")
-        company = ctx.get("company", "")
-        jd_snippet = ctx.get("job_description", "")[:200]
-        if role and company:
-            cv_data["summary"] = (
-                f"{CV['summary'].split('.')[0]}. "
-                f"Applying for {role} at {company} — "
-                f"with hands-on experience in {', '.join(ctx.get('emphasis', []) or ['AI systems', 'full-stack development', 'production infrastructure'])}."
-            )
+        if not strict:
+            # Safety net: a tailored CV must NOT be a thinner CV. If the
+            # agent dropped experiences, append the missing ones from
+            # base so the user's history is preserved. Match by company.
+            base_exp = CV.get("experience", []) or []
+            tailored_exp = cv_data.get("experience", []) or []
+            seen_companies = {e.get("company", "").strip().lower() for e in tailored_exp}
+            for base_entry in base_exp:
+                key = base_entry.get("company", "").strip().lower()
+                if key and key not in seen_companies:
+                    tailored_exp.append(deepcopy(base_entry))
+            cv_data["experience"] = tailored_exp
+
+            # Project safety: if projects were emptied (folded into
+            # experience), leave them empty. If non-empty but base had
+            # more, backfill — the user wants every project visible.
+            base_projects = CV.get("projects", []) or []
+            tailored_projects = cv_data.get("projects", [])
+            if tailored_projects:
+                seen_projects = {p.get("name", "").strip().lower() for p in tailored_projects}
+                for base_proj in base_projects:
+                    key = base_proj.get("name", "").strip().lower()
+                    if key and key not in seen_projects:
+                        tailored_projects.append(deepcopy(base_proj))
+                cv_data["projects"] = tailored_projects
+    else:
+        cv_data = deepcopy(CV)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     if content_type == "cover_letter":
         if not cover_letter_text:
@@ -167,6 +292,12 @@ async def generate_pdf(
         fname = filename or f"cv_{timestamp}.pdf"
         html_content = _render_cv_html(cv_data)
 
+    # Lock output directory — only basename is honoured. Prevents agents
+    # from writing CVs to /tmp (where they get garbage-collected) or other
+    # arbitrary locations. All generated PDFs land in data/cv_output/.
+    fname = Path(fname).name
+    if not fname.lower().endswith(".pdf"):
+        fname = f"{fname}.pdf"
     output_path = CV_OUTPUT_DIR / fname
 
     try:
@@ -714,20 +845,66 @@ TOOL_SCHEMAS = {
             "type": "function",
             "function": {
                 "name": "tailor_cv",
-                "description": "Get CV + job context for tailoring. Returns CV data and tailoring instructions.",
+                "description": (
+                    "Build a tailored CV from small deltas (no need to "
+                    "emit a full CV dict). The tool reorders, replaces "
+                    "summary, appends bullets, and stages the result. "
+                    "After this, call generate_pdf() with NO args."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "job_title": {"type": "string", "description": "The role being applied for"},
+                        "job_title": {"type": "string", "description": "Role being applied for"},
                         "company": {"type": "string", "description": "Company name"},
-                        "job_description": {"type": "string", "description": "Full or summarised job description"},
+                        "job_description": {"type": "string", "description": "Full or summarised JD (will be truncated)"},
+                        "new_summary": {
+                            "type": "string",
+                            "description": (
+                                "The new profile summary, ~3-6 sentences, "
+                                "in the user's voice. Lead with concrete "
+                                "proof of fit. NOT a template — name "
+                                "specific shipped projects that match the "
+                                "JD's top requirements."
+                            ),
+                        },
+                        "lead_with": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Company names from the base CV that "
+                                "should appear FIRST in priority order "
+                                "(e.g. ['Diaspora AI Ltd', 'Self-directed', "
+                                "'Diaspora AI Product Suite']). The tool "
+                                "reorders for you. Anything not listed "
+                                "keeps its original order at the bottom. "
+                                "Use exact company strings from base CV."
+                            ),
+                        },
+                        "bullet_additions": {
+                            "type": "object",
+                            "description": (
+                                "Optional. Map of company name → list of "
+                                "extra bullet strings to APPEND to that "
+                                "entry. Use sparingly, only for the 1-2 "
+                                "lead entries to add JD-matching depth."
+                            ),
+                        },
+                        "skills_priority": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Optional. Skill category names (e.g. "
+                                "['ai_ml', 'backend', 'languages']) in "
+                                "priority order. Unlisted categories follow."
+                            ),
+                        },
                         "emphasis": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Optional skills/experiences to highlight",
+                            "description": "Optional. Themes/skills to highlight",
                         },
                     },
-                    "required": ["job_title", "company", "job_description"],
+                    "required": ["job_title", "company", "job_description", "new_summary", "lead_with"],
                 },
             },
         },

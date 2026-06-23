@@ -40,6 +40,71 @@ def _default_chat_id() -> str:
     return os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 
+def _find_artifact_fuzzy(requested_name: str) -> Path | None:
+    """LLM-friendly fallback: when the agent passes a hallucinated filename
+    that doesn't exist, search recently-modified files in known FRIDAY output
+    directories whose name contains the same tokens (case-insensitive).
+
+    Example: agent asks for `Mark_Smith_Background_Check.docx` but the real
+    file is `mark_smith_20260601_173452.docx`. Tokens 'mark', 'smith' both
+    appear in the real filename → return that.
+    """
+    import re as _re
+    import time as _time
+
+    # Pull alpha tokens of length >= 3 from the requested name (ignore
+    # 'background', 'check', 'report' generic words; keep distinctive ones)
+    raw = Path(requested_name).stem.lower()
+    tokens = [t for t in _re.findall(r"[a-z]{3,}", raw)
+              if t not in {"background", "check", "report", "investigation", "dossier", "file", "doc", "the", "and"}]
+    if not tokens:
+        return None
+
+    # Extension match if specified
+    want_ext = Path(requested_name).suffix.lower()
+
+    candidates: list[tuple[float, Path]] = []
+    search_dirs = [
+        Path.home() / "Friday" / "investigations",
+        Path.home() / "Friday" / "reports",
+        Path.home() / "Desktop" / "JARVIS" / "data" / "cv_output",
+        Path.home() / "Desktop" / "JARVIS" / "data" / "research",
+        Path.home() / "Downloads",
+        Path.home() / "Desktop",
+        Path("/tmp"),
+    ]
+    now = _time.time()
+    for d in search_dirs:
+        if not d.exists() or not d.is_dir():
+            continue
+        try:
+            for f in d.iterdir():
+                if not f.is_file():
+                    continue
+                if want_ext and f.suffix.lower() != want_ext:
+                    continue
+                name_lower = f.name.lower()
+                # Require at least 1 distinctive token to match
+                matches = sum(1 for t in tokens if t in name_lower)
+                if matches == 0:
+                    continue
+                # Score: more matching tokens > more recent file > extension match
+                age_hours = (now - f.stat().st_mtime) / 3600.0
+                if age_hours > 168:  # skip files older than a week
+                    continue
+                score = matches * 100 - age_hours
+                candidates.append((score, f))
+        except OSError:
+            continue
+
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    log.info("telegram fuzzy match: requested=%r → resolved=%r (score=%.1f)",
+             requested_name, str(candidates[0][1]), candidates[0][0])
+    return candidates[0][1]
+
+
 def _err(code: ErrorCode, msg: str) -> ToolResult:
     return ToolResult(
         success=False,
@@ -108,7 +173,15 @@ async def _send_file(method: str, field: str, path_or_url: str, chat_id: str,
     else:
         p = Path(path_or_url).expanduser()
         if not p.exists():
-            return _err(ErrorCode.NOT_FOUND, f"file not found: {p}")
+            # Fallback: the LLM often hallucinates a "reasonable looking"
+            # filename when the real artifact has a timestamped name. Token-
+            # match the requested basename against recently-created files in
+            # known output directories.
+            fuzzy = _find_artifact_fuzzy(p.name)
+            if fuzzy:
+                p = fuzzy
+            else:
+                return _err(ErrorCode.NOT_FOUND, f"file not found: {p}")
         if p.stat().st_size > 50 * 1024 * 1024:
             return _err(ErrorCode.VALIDATION_ERROR,
                         f"file too big ({p.stat().st_size/1e6:.1f} MB) — Telegram max is 50 MB")

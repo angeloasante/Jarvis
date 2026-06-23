@@ -9,6 +9,7 @@ are recomputed on import.
 """
 
 import re
+from pathlib import Path
 
 from friday.core.user_config import USER
 
@@ -117,6 +118,30 @@ def _tone_block() -> str:
     return f"TONE NOTE: {USER.tone}"
 
 
+def _soul_block() -> str:
+    """User-editable identity layer, à la Hermes' SOUL.md.
+
+    Read from ~/Friday/SOUL.md (or legacy ~/.friday/SOUL.md). Unlike the
+    code-defined voice rules, this is a plain-text file the user owns and
+    edits — the deepest layer of who FRIDAY is. Honoured above the
+    templated voice when present. Empty string if the file is absent.
+    """
+    for p in (Path.home() / "Friday" / "SOUL.md",
+              Path.home() / ".friday" / "SOUL.md"):
+        try:
+            if p.exists():
+                txt = p.read_text(encoding="utf-8").strip()
+                if txt:
+                    return (
+                        "SOUL — your core identity, written by the user. "
+                        "Honour this above the generic voice rules:\n\n"
+                        f"{txt}"
+                    )
+        except OSError:
+            continue
+    return ""
+
+
 def _assemble(blocks: list[str]) -> str:
     return "\n\n".join(b for b in blocks if b)
 
@@ -125,6 +150,7 @@ def get_personality() -> str:
     """Full personality prompt, personalised to the current user config."""
     return _assemble([
         _header(),
+        _soul_block(),
         _about_user(),
         _slang_block(),
         _CORE_VOICE,
@@ -145,6 +171,13 @@ def user_context_block() -> str:
     lines: list[str] = ["ABOUT THE USER (from ~/Friday/user.json):"]
     if USER.name:
         lines.append(f"- Name: {USER.name}")
+    if USER.aliases:
+        lines.append(
+            f"- Also goes by: {', '.join(USER.aliases)}. When you see any of "
+            f"these names in a page, search result, or scraped content, the "
+            f"user themselves is the subject — don't speculate about who that "
+            f"person is."
+        )
     bio = USER.bio_line()
     if bio:
         lines.append(f"- {bio}")
@@ -237,6 +270,7 @@ def get_personality_slim() -> str:
     )
     return _assemble([
         _header(slim=True),
+        _soul_block(),
         _about_user(),
         _slang_block(),
         slim_voice,
@@ -342,7 +376,17 @@ DISPATCH_TOOL = {
     "type": "function",
     "function": {
         "name": "dispatch_agent",
-        "description": "Delegate a task to a specialist agent. Use this when the task needs code, research, or memory operations.",
+        "description": (
+            "Delegate a task to a specialist agent. Emit ONE call per agent the "
+            "request needs.\n"
+            "• INDEPENDENT tasks (no task needs another's output) → emit them with "
+            "empty depends_on; they run IN PARALLEL. e.g. 'search the web for X' "
+            "AND 'check if Ellen texted me' are independent.\n"
+            "• DEPENDENT tasks (one needs the output of another) → set depends_on "
+            "to the agent(s) it follows; they run IN ORDER and receive the prior "
+            "output. e.g. 'background check on X' THEN 'format the findings into a "
+            "doc' THEN 'send it on Telegram' — each step depends on the one before."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -354,6 +398,15 @@ DISPATCH_TOOL = {
                 "task": {
                     "type": "string",
                     "description": "Clear description of what the agent should do",
+                },
+                "depends_on": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Agent names whose output THIS task needs first. Empty/"
+                        "omitted = independent, runs in parallel. Populate ONLY for "
+                        "true chains where this task consumes another's result."
+                    ),
                 },
             },
             "required": ["agent", "task"],

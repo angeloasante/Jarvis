@@ -1,6 +1,7 @@
 """FRIDAY CLI — text + voice interface."""
 
 import asyncio
+import logging
 import os
 import random
 import sys
@@ -22,6 +23,60 @@ from friday.background.cron_scheduler import get_cron_scheduler
 
 console = Console()
 HISTORY_FILE = DATA_DIR / ".friday_history"
+
+# ── Logging — captured, NOT streamed to the terminal ─────────────────────────
+# Logs go to an in-memory ring buffer + a rotating file. The terminal stays
+# clean (only ◈ status + FRIDAY's replies show). Pull detail any time with the
+# /logs command. Set FRIDAY_LOG_CONSOLE=1 to also stream to the terminal.
+from collections import deque
+from logging.handlers import RotatingFileHandler
+from pathlib import Path as _Path
+
+_LOG_BUFFER: deque = deque(maxlen=800)
+
+
+class _BufferLogHandler(logging.Handler):
+    """Keeps the last N formatted log lines for the /logs command."""
+    def emit(self, record):
+        try:
+            _LOG_BUFFER.append(self.format(record))
+        except Exception:
+            pass
+
+
+def _setup_logging() -> None:
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s  %(name)-22s  %(message)s", datefmt="%H:%M:%S")
+
+    buf = _BufferLogHandler()
+    buf.setFormatter(fmt)
+    root.addHandler(buf)
+
+    try:
+        logdir = _Path.home() / "Friday" / "logs"
+        logdir.mkdir(parents=True, exist_ok=True)
+        fh = RotatingFileHandler(logdir / "friday.log", maxBytes=2_000_000, backupCount=3)
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+    except OSError:
+        pass
+
+    # Opt-in firehose to the actual terminal.
+    if os.getenv("FRIDAY_LOG_CONSOLE", "").lower() in ("1", "true", "yes"):
+        ch = logging.StreamHandler()
+        ch.setFormatter(fmt)
+        root.addHandler(ch)
+
+    # Periodic infra + chatty libs → only WARNING+ ever reaches the buffer.
+    for _noisy in ("httpx", "httpcore", "urllib3", "websockets", "openai", "PIL",
+                   "asyncio", "telegram", "markdown_it", "apscheduler",
+                   "friday.background.github_sync", "friday.heartbeat",
+                   "friday.cron", "friday.skills.embedder"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
+
+
+_setup_logging()
 
 # Colors
 G = "green"
@@ -183,6 +238,17 @@ async def main():
         except Exception as e:
             console.print(f"  [red]✗ Telegram bot failed: {e}[/red]")
 
+    # Browser-extension bridge — WebSocket on :3210 for the user's real
+    # Chrome to connect into. Boots regardless of whether the extension
+    # is installed; it'll just sit waiting for a connection.
+    try:
+        from friday.browser_ext import start_bridge
+        bx_loop = asyncio.get_event_loop()
+        start_bridge(bx_loop)
+        console.print("  [bold green]:: Browser-ext bridge listening on ws://127.0.0.1:3210[/bold green]")
+    except Exception as e:
+        console.print(f"  [red]✗ Browser-ext bridge failed: {e}[/red]")
+
     # Inbound SMS tunnel — started by `friday setup twilio`. Three possible
     # configs, in priority order: static ngrok domain > ephemeral ngrok URL
     # saved from the wizard > tailscale funnel URL. The wizard auto-
@@ -240,6 +306,7 @@ async def main():
             console.print("  [green]/quit[/green]              Exit FRIDAY")
             console.print("  [green]/clear[/green]             Reset conversation history")
             console.print("  [green]/memory[/green]            Show recent stored memories")
+            console.print("  [green]/logs[/green] [dim][n][/dim]          Show last n log lines (default 40)")
             console.print("  [green]/help[/green]              This menu")
             console.print()
             console.print("  [bold green]Voice[/bold green]")
@@ -258,6 +325,7 @@ async def main():
             console.print("  [bold green]Messaging channels[/bold green]")
             console.print("  [green]/telegram[/green]          Show Telegram bot status + chat_id")
             console.print("  [green]/sms[/green]               Show SMS webhook status + Twilio tunnel")
+            console.print("  [green]/browser-ext[/green]       Show browser-extension bridge status")
             console.print()
             console.print("  [bold green]Agent Override[/bold green]")
             console.print("  [green]@comms[/green]             Force route to comms agent")
@@ -287,6 +355,23 @@ async def main():
         if user_input == "/clear":
             friday.conversation.clear()
             console.print("  [dim green]:: Conversation cleared[/dim green]\n")
+            continue
+
+        if user_input == "/logs" or user_input.startswith("/logs "):
+            # /logs [n] — show the last n captured log lines (default 40).
+            parts = user_input.split()
+            n = 40
+            if len(parts) > 1 and parts[1].isdigit():
+                n = int(parts[1])
+            recent = list(_LOG_BUFFER)[-n:]
+            console.print()
+            if not recent:
+                console.print("  [dim green]No logs captured yet.[/dim green]")
+            else:
+                for line in recent:
+                    console.print(f"  [dim]{line}[/dim]")
+                console.print(f"\n  [dim green]:: {len(recent)} lines · full log at ~/Friday/logs/friday.log[/dim green]")
+            console.print()
             continue
 
         if user_input == "/memory":
@@ -356,6 +441,18 @@ async def main():
                     console.print(f"  [dim]allowed chats: {allowed or 'OPEN (no lock)'}[/dim]\n")
                 except Exception as e:
                     console.print(f"  [red]:: Telegram check failed: {e}[/red]\n")
+            continue
+
+        if user_input == "/browser-ext":
+            try:
+                from friday.browser_ext import bridge as _bridge
+                s = _bridge.status()
+                state = "[bold green]CONNECTED[/bold green]" if s["connected"] else "[bold yellow]waiting for extension[/bold yellow]"
+                console.print(f"  :: Browser-ext bridge — {state}  (port {s['port']})")
+                console.print(f"  [dim]extension: {s['extension'] or '—'}  v{s['version'] or '?'}  tabs={s['tabs_open']}[/dim]")
+                console.print(f"  [dim]token in ~/Friday/.env: FRIDAY_BROWSER_EXT_TOKEN[/dim]\n")
+            except Exception as e:
+                console.print(f"  [red]:: Browser-ext check failed: {e}[/red]\n")
             continue
 
         if user_input == "/sms":

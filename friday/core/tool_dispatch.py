@@ -87,6 +87,11 @@ TOOL_NAMES = [
     "send_telegram_voice", "send_telegram_document", "send_telegram_video",
     # Voice synthesis → file, pairs with the telegram voice/audio tools
     "tts_to_file",
+    # Browser extension — user's real Chrome (logged-in / anti-bot / "fill the form on my screen")
+    "browser_ext_navigate", "browser_ext_get_active_tab", "browser_ext_list_tabs",
+    "browser_ext_click", "browser_ext_fill", "browser_ext_get_text",
+    "browser_ext_scroll", "browser_ext_scan", "browser_ext_highlight",
+    "browser_ext_status",
     # Social
     "search_x", "get_my_mentions",
     # Information
@@ -156,8 +161,16 @@ def _build_tools():
     except Exception:
         vt = {}
 
+    # Browser extension — act in the user's real Chrome (logged-in
+    # sessions, anti-bot pages, "fill the form on my screen").
+    try:
+        from friday.tools.browser_ext_tools import TOOL_SCHEMAS as bxt
+    except Exception:
+        bxt = {}
+
     all_schemas = {}
-    for src in [email, cal, calls, web, x, mac, mem, files, brief, imsg, cron, watch, screen, cast, wa, sms, tg, vt]:
+    for src in [email, cal, calls, web, x, mac, mem, files, brief, imsg,
+                cron, watch, screen, cast, wa, sms, tg, vt, bxt]:
         all_schemas.update(src)
 
     DIRECT_TOOLS.update({n: all_schemas[n] for n in TOOL_NAMES if n in all_schemas})
@@ -225,6 +238,30 @@ async def try_direct_dispatch(
 
     # Form filling is multi-step (discover → fill → verify) — needs agent, not single tool
     if "fill" in s and ("form" in s or "field" in s or "application" in s):
+        return False
+
+    # Job FIT questions ("do I qualify", "am I a fit", "would you recommend",
+    # "which of my projects fit", "should I apply") need job_agent — direct
+    # dispatch would just read the JD with one tool and answer with a generic
+    # checklist, never grounding in the user's actual GitHub repos.
+    if re.search(r"\b(qualify|am i (a )?fit|good fit|right fit|would you recommend|which (of )?my (project|repo)s?|should i apply|do i (have|fit)|how do i stack|stack up)\b", s):
+        return False
+
+    # OSINT / background-check phrases need investigation_agent — direct
+    # dispatch would just call search_web with the name and return a one-shot
+    # summary, missing the structured triangulation (LinkedIn + filings +
+    # public records + news + cross-references) the investigation agent runs.
+    # Strong 2-word phrases bail without needing a preposition.
+    if re.search(r"\b(background check|osint|due diligence)\b", s):
+        return False
+    # Verb forms — require preposition to avoid catching "investigate the bug".
+    if re.search(r"\b(investigate|investigation|look into)\s+(this\s+)?(person|guy|woman|man|name|name of|on|into|about)?\s*\b[A-Z]", user_input):
+        return False
+    if re.search(r"\b(investigate|investigation)\s+(on|into|about)\b", s):
+        return False
+    if re.search(r"\brun\s+(an?\s+)?(osint|background check|investigation|due diligence)\b", s):
+        return False
+    if re.search(r"\bdig\s+(up|into)\b.{0,40}\b(on|about)\b", s):
         return False
 
     # If input contains a URL, skip — URLs need research_agent for full page fetch + analysis

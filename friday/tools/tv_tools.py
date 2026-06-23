@@ -823,7 +823,13 @@ TOOL_SCHEMAS = {
         "fn": tv_play_pause,
         "schema": {"type": "function", "function": {
             "name": "tv_play_pause",
-            "description": "Play, pause, stop, rewind, or fast-forward content.",
+            "description": (
+                "Transport controls for the LG TV (play, pause, stop, rewind, "
+                "fast-forward). "
+                "ONLY use for VIDEO/SHOW/MOVIE content playing ON THE TV. "
+                "DO NOT use for music. 'pause the music', 'skip this song', "
+                "'play i wish i had a girlfriend' → use play_music instead."
+            ),
             "parameters": {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["play", "pause", "stop", "rewind", "fastforward"]},
             }, "required": ["action"]},
@@ -835,7 +841,16 @@ TOOL_SCHEMAS = {
         "fn": tv_launch_app,
         "schema": {"type": "function", "function": {
             "name": "tv_launch_app",
-            "description": "Launch an app. Supported: netflix, youtube, spotify, prime, disney, apple tv, browser, hdmi1-4, live tv, settings.",
+            "description": (
+                "Launch a streaming app ON THE LG TV via WebOS. "
+                "ONLY use when the user's request EXPLICITLY targets the TV — "
+                "phrases like 'on my tv', 'on the tv', 'launch X on tv', "
+                "'put X on the big screen'. "
+                "DO NOT use for bare 'open netflix' or 'open spotify' — those mean "
+                "the Mac desktop app (use open_application). "
+                "Supported TV apps: netflix, youtube, spotify, prime, disney, apple tv, "
+                "browser, hdmi1-4, live tv, settings."
+            ),
             "parameters": {"type": "object", "properties": {
                 "app_name": {"type": "string", "description": "App name (e.g. 'netflix', 'youtube', 'hdmi1')"},
             }, "required": ["app_name"]},

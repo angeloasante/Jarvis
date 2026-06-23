@@ -49,14 +49,14 @@ NEVER guess element selectors. ALWAYS snapshot first to get @refs.
 ## Handling Login Pages
 
 If `browser_navigate` returns `login_required: true`:
-1. Tell Travis: "This page needs login. I'll wait while you log in."
+1. Tell user: "This page needs login. I'll wait while you log in."
 2. Call `browser_wait_for_login(timeout=120)`
 3. Once logged in, the session persists for future visits
 
 ## Session Persistence
 
 The browser uses a persistent profile at `~/.friday/browser_data/`.
-Cookies and sessions survive across FRIDAY restarts. If Travis logged into
+Cookies and sessions survive across FRIDAY restarts. If the user logged into
 LinkedIn once, he doesn't need to again.
 
 ## Performance Tips

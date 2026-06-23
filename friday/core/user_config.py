@@ -52,6 +52,11 @@ class UserConfig:
     phone: str = ""
     github: str = ""
     website: str = ""
+    # Other names / handles the user goes by online (artist names, legal name
+    # vs nickname, married name, pseudonyms). FRIDAY uses these to recognise
+    # the user when they show up in scraped pages, search results, social
+    # profiles, etc.  e.g. ["Angelo Asante", "Travis Moore"].
+    aliases: list[str] = field(default_factory=list)
 
     # Voice / personality
     tone: str = ""
@@ -163,6 +168,7 @@ def _to_dict(cfg: UserConfig) -> dict:
         "phone": cfg.phone,
         "github": cfg.github,
         "website": cfg.website,
+        "aliases": cfg.aliases,
         "tone": cfg.tone,
         "slang": cfg.slang,
         "contact_aliases": cfg.contact_aliases,

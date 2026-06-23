@@ -28,6 +28,16 @@ except Exception:
     BROWSER_TOOLS = {}
     _HAS_BROWSER = False
 
+# Browser-extension tools — control the user's real Chrome via the
+# Manifest-V3 bridge. Always available (the bridge module imports cleanly
+# even when the extension isn't connected — tools fail gracefully).
+try:
+    from friday.tools.browser_ext_tools import TOOL_SCHEMAS as BROWSER_EXT_TOOLS
+    _HAS_BROWSER_EXT = True
+except Exception:
+    BROWSER_EXT_TOOLS = {}
+    _HAS_BROWSER_EXT = False
+
 # CV tools — needed when form filling requires CV upload
 try:
     from friday.tools.cv_tools import TOOL_SCHEMAS as CV_TOOLS
@@ -88,6 +98,64 @@ PATTERNS:
 - "read the text on screen" → ocr_screen()
 - "solve the questions on my screen" → solve_screen_questions()
 - "read the full page" → capture_full_page()
+
+══════════════════════════════════════════════════════════
+BROWSER vs SCREEN — DISAMBIGUATE BY THE USER'S WORDS:
+══════════════════════════════════════════════════════════
+The user has TWO ways to tell you what they're looking at: their MAC SCREEN
+(OCR/vision over pixels) and their REAL CHROME TAB (DOM via the
+browser-extension bridge). DOM is always more accurate than OCR. Read the
+user's words:
+
+DECISION ORDER (apply rules top-to-bottom; first match wins):
+
+(A) "browser" / "tab" / "in chrome" / "in safari" / "in firefox" appears
+    anywhere in the query → browser_ext_get_active_tab(include_text=True)
+
+(B) "my <social/news/web site name>" appears anywhere — e.g. "my LinkedIn
+    feed", "my X timeline", "my YouTube subscriptions", "my Gmail inbox",
+    "my Google Doc", "my Notion page", "my Hacker News feed", "my Reddit",
+    "my Twitter mentions" → browser_ext_get_active_tab(). The user is
+    almost certainly on that site in their active tab.
+    NOT search_web (that's for asking ABOUT the site, not reading what's
+    open RIGHT NOW).
+
+(C) "page" / "the page i'm on" / "this page" / "what i'm looking at" /
+    "what i'm reading" / "the article" → browser_ext_get_active_tab().
+    These words ALMOST ALWAYS mean a webpage, not the Mac desktop.
+    "page on my screen" → browser_ext_get_active_tab (page beats screen).
+
+(D) "screen" / "see my mac" / "what i can see" / "what app is open" with
+    NO website / page / tab / browser hint → ask_about_screen() or
+    ocr_screen(). These are about the Mac desktop globally.
+    Examples:
+      "what's on my screen"            → ask_about_screen()
+      "what app is open right now"     → ask_about_screen()
+      "read what's on screen"          → ocr_screen()
+      "solve the question on screen"   → solve_screen_questions()
+
+(E) Default for "tell me about / explain / summarise" + a phrase that
+    references something the user is currently doing → favour
+    browser_ext_get_active_tab() because the user is most often on the
+    web. ask_about_screen() is the right fallback only when the previous
+    rules didn't fire.
+
+EXAMPLES:
+  "what tabs do I have open"          → browser_ext_list_tabs()
+  "read me what i'm looking at"       → browser_ext_get_active_tab()
+  "summarise the page i'm on"         → browser_ext_get_active_tab()
+  "analyse the page on my browser"    → browser_ext_get_active_tab()
+  "analyse the page on my screen"     → browser_ext_get_active_tab() (page wins)
+  "what's the top story in my LinkedIn feed" → browser_ext_get_active_tab()
+  "click the login button"            → browser_ext_click(text="Login")
+  "fill the form on my browser"       → browser_ext_get_active_tab() then browser_ext_fill()
+  "what app is on my screen"          → ask_about_screen()  (no browser cue)
+  "what's that error on my screen"    → ask_about_screen()  (likely native app)
+  "read the text from this PDF"       → pdf_read or ocr_screen — NOT browser
+
+NEVER fabricate screen content. If browser_ext_* tools return that the
+extension isn't connected, tell the user honestly and suggest running
+"friday setup browser-ext" — do not pretend you saw the page.
 
 FORM FILLING (when the user says "fill the form", "fill in the form for me", etc.):
 
@@ -220,6 +288,12 @@ class SystemAgent(BaseAgent):
                           "open_on_extended_display", "list_displays"):
                 if name in CAST_TOOLS:
                     self.tools[name] = CAST_TOOLS[name]
+        # Browser-extension tools — always loaded. Fail gracefully when no
+        # extension is connected so the LLM can fall back to Playwright
+        # (browser_*) without re-prompting the user.
+        if _HAS_BROWSER_EXT:
+            for k, v in BROWSER_EXT_TOOLS.items():
+                self.tools[k] = v
         super().__init__()
 
     async def run(self, task: str, context: str = "", on_tool_call=None, on_chunk=None):

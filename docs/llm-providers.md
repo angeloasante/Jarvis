@@ -314,33 +314,6 @@ ollama pull qwen3.5:9b        # ~6 GB
 ollama serve                   # or launch the Ollama.app
 ```
 
-FRIDAY auto-detects the server on `http://localhost:11434`. Hardware: 16 GB RAM minimum; M-series Macs keep the model resident in VRAM via `keep_alive: -1`, so after first load every call is sub-second context rebuild.
-
----
-
-## 11. Hybrid mode (cascade, then local Ollama)
-
-Nothing to enable — this is the default behaviour of `cloud_chat()`. Call flow:
-
-1. Try the **primary** provider (whichever resolved from §1).
-2. On any non-fatal error — `RateLimitError`, `APIError`, `APIConnectionError`, timeouts, auth failures — step to the next entry in `CLOUD_FALLBACK_CHAIN`.
-3. If the error is a daily-limit (`free-models-per-day`, `usage limit`, etc.), mark that provider **exhausted for the session** so later calls don't waste time trying it.
-4. When every cloud provider either errors or is already marked exhausted, drop to local Ollama at `http://localhost:11434`.
-5. Log which provider actually answered (`cloud_chat answered via fallback provider: …`) for debug / `friday doctor`.
-
-Design decisions baked in:
-
-- **`max_retries=0`** on every OpenAI client. The SDK's built-in exponential-backoff used to burn 3 requests per provider before cascading. On free tiers (50 req/day) that's 6% of your daily cap on one call.
-- **Daily-limit errors don't retry within the session.** When OpenRouter says `free-models-per-day`, the cap resets at midnight UTC — retrying in 30 seconds won't help. We cache the exhaustion and skip the provider until restart.
-- **Transient 429s** (upstream model overload) DO cascade every call — they might clear within seconds.
-
-So if your plane loses wifi mid-session, FRIDAY keeps working as long as Ollama is running. If Ollama isn't running either, the user sees a concrete error with the last cloud exception in the log.
-
-To force local-only (e.g. privacy-sensitive session), `unset` the cloud keys before launch.
-
----
-
-## 12. Environment variable reference
 
 | Variable | Effect | Example |
 |---|---|---|

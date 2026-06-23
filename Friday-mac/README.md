@@ -1,60 +1,74 @@
 # FRIDAY macOS App
 
-SwiftUI menu bar app that drives the FRIDAY AI OS.
+Native SwiftUI app that wraps FridayCore. Menu-bar bolt, full-window chat with sidebar, streaming token-by-token responses, Gmail OAuth onboarding, and a bundled Python 3.12 runtime so end users don't need `uv` or the repo.
 
-## Setup in Xcode
+Full architecture, menu-bar integration, NDJSON protocol, onboarding and reset procedure, and build pipeline are documented in **[docs/mac-app.md](../docs/mac-app.md)**. Product vision and iOS plan are in **[docs/app-spec.md](../docs/app-spec.md)**.
 
-1. **Open Xcode** → File → New → Project
-2. Pick **macOS → App**
-3. Settings:
-   - Product Name: `Friday`
-   - Team: your Apple ID (free is fine for local dev)
-   - Organization Identifier: `com.travis.friday` (or whatever)
-   - Interface: **SwiftUI**
-   - Language: **Swift**
-   - Uncheck "Use Core Data" and "Include Tests"
-4. Save location: **`/Users/travismoore/Desktop/JARVIS/Friday-mac`** (this folder)
-5. Xcode creates `Friday.xcodeproj` and a starter `FridayApp.swift`
-6. **Replace Xcode's default files with the ones already in this folder:**
-   - Drag `FridayApp.swift`, `MenuBarContent.swift`, `FridayClient.swift`, `SettingsView.swift` into the project navigator
-   - Let Xcode overwrite the default `FridayApp.swift` and `ContentView.swift` (delete ContentView.swift if it's not used)
-7. **Info.plist settings** (Project → Friday target → Info tab):
-   - Add key `LSUIElement` → Boolean → `YES` (hides dock icon — this is a menu bar app)
-   - Add key `NSAppleEventsUsageDescription` → String → "FRIDAY needs to control other apps on your behalf."
-8. Press **⌘R** to run
+---
 
-## What You Should See
+## Developing against the repo
 
-- A green lightning bolt icon in your menu bar
-- Click it → command bar pops up
-- Type "yo" → press Enter → FRIDAY responds via shelling out to `uv run`
+1. `open Friday/Friday.xcodeproj`
+2. ⌘R with the Debug scheme — the app shells out to `uv run python -u -m friday.core.oneshot_runner …` in `~/Desktop/JARVIS`. If your repo lives somewhere else, set the `fridayRepoPath` key in `UserDefaults` or drop a symlink at `~/Desktop/JARVIS`.
+3. Per-user secrets (LLM keys, Twilio, Gmail) are entered in the app's onboarding or Settings and persisted in Keychain — no `.env` edits required while iterating.
 
-## Current Architecture
+Xcode project settings that matter:
 
-```
-SwiftUI App
-    │
-    │  Process.run("uv run python -m friday.core.oneshot_runner")
-    │
-    ▼
-FridayCore (Python, from ~/Desktop/JARVIS)
+- **Info tab** → `NSAppleEventsUsageDescription` — "FRIDAY needs to control other apps on your behalf."
+- **Entitlements** → `com.apple.security.files.user-selected.read-only`, `com.apple.security.get-task-allow`. The app is currently **not** fully sandboxed — UserDefaults land at `~/Library/Preferences/com.travis.Friday.plist`.
+- **Signing** → your personal team is fine for local dev; the bundled Python binary isn't re-signed, so don't enable Hardened Runtime for Debug.
+
+## Building a self-contained `.app`
+
+```bash
+./build_bundle.sh            # Debug
+./build_bundle.sh release    # Release
 ```
 
-The shell-out is temporary. Next step: local WebSocket server in FridayCore, Swift client connects via URLSession/Starscream.
+The script downloads python-build-standalone 3.12 (once, cached under `build/`), installs FridayCore + its runtime deps into that interpreter, prunes test suites / `__pycache__`, and copies the result into `Friday.app/Contents/Resources/python/`. It then writes `Resources/friday_defaults.env` with the shared FRIDAY-team Tavily key so end users get web search out of the box.
 
-## Files
+Bundle sanity check runs at the end — imports `friday` from inside the `.app`, asserts the path is under `Resources/python/` (not the repo), and imports `friday.core.oneshot_runner.run_stream`.
 
-- `FridayApp.swift` — app entry point, MenuBarExtra scene
-- `MenuBarContent.swift` — the UI that appears on menu bar click
-- `FridayClient.swift` — bridge to FridayCore (Python shell-out for now)
-- `SettingsView.swift` — preferences window (repo path, account connections)
+### Deliberately NOT bundled (v1)
 
-## Next Steps (in order)
+To keep the bundle slim, these heavy deps aren't shipped — users can install separately if they want the capability:
 
-1. Get the app building and running — test the shell-out with a simple command
-2. Create `friday/core/oneshot_runner.py` in the Python repo — reads stdin, runs `FridayCore.process()`, prints result
-3. Replace shell-out with WebSocket server on port 18789
-4. Add streaming responses (tokens appear live as they arrive)
-5. Add global hotkey (Cmd+Shift+F) via `HotKey` package
-6. Add native notifications via `UserNotifications` framework
-7. Package Python runtime inside the app bundle (PyInstaller or embedded framework)
+- `mediapipe`, `opencv-python` — gesture control (Swift + CoreML port coming)
+- `playwright`, `selenium` — browser automation (Safari AppleScript fallback works for most flows)
+- `mlx-whisper`, `kokoro-onnx`, `sounddevice`, `onnxruntime` — voice pipeline
+
+Everything else ships: LLM routing + agents, email / calendar, iMessage / WhatsApp / SMS, TV control, X, research, memory, docx generation.
+
+## Source layout
+
+```
+Friday-mac/
+├── Friday/Friday/
+│   ├── FridayApp.swift            @main, NSStatusItem + NSPopover
+│   ├── FridayClient.swift         subprocess + NDJSON line-reader
+│   ├── MenuBarContent.swift       popover chat UI
+│   ├── SettingsView.swift         native Cmd+, preferences
+│   ├── Commands.swift             slash + NL command matching
+│   ├── MediaPreview.swift         docx / pdf / image previews in chat
+│   ├── MainWindow/                full-window chat + settings panes
+│   ├── Onboarding/                5-step flow
+│   ├── Services/                  ChatStore, OnboardingState, GmailAuth, WhatsAppBridge
+│   └── Components/                logo + brand icons
+└── build_bundle.sh                Python bundling pipeline
+```
+
+## Resetting the app to a clean state
+
+`defaults delete` alone races with `cfprefsd`'s cache. Reliable reset:
+
+```bash
+pkill -9 -f "Friday.app"
+rm -f  ~/Library/Preferences/com.travis.Friday.plist
+rm -rf ~/Library/Containers/com.travis.Friday
+rm -rf "$HOME/Library/Application Support/Friday"
+rm -f  ~/.friday/google_token.json
+killall -u "$(whoami)" cfprefsd
+open /Applications/Friday.app
+```
+
+After that, next launch shows onboarding from step 1.

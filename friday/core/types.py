@@ -75,3 +75,7 @@ class AgentResponse:
     error: Optional[str] = None
     tools_called: list[str] = field(default_factory=list)
     duration_ms: Optional[int] = None
+    # File paths produced by tool calls during this run (screenshots, PDFs,
+    # CVs, research docs). Extracted from ToolResult.data at the base_agent
+    # level — this is ground truth, not regex-parsed from text.
+    media_paths: list[str] = field(default_factory=list)

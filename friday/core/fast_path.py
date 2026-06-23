@@ -62,6 +62,17 @@ async def match_fast(s: str):
         tv_screen_on, tv_status,
     )
 
+    # Strip natural-speech filler that voice transcripts pick up so
+    # "Finally, turn my TV off please" still hits the fast path.
+    s = re.sub(
+        r"^(?:please|now|finally|okay|ok|so|alright|yo|hey|right)[,\s]+", "", s
+    )
+    s = re.sub(
+        r"[,\s]+(?:please|for me|now|then|thanks|thank you|mate|bro|bruv|fam|man|chale)\s*[.!?]*$",
+        "", s,
+    )
+    s = s.strip().rstrip(".!?")
+
     # ── TV Multi-step: "turn on tv and open youtube" ──
     m = re.search(
         r"^(?:turn|switch|power)\s+(?:on\s+)?(?:my\s+|the\s+)?(?:tv|telly|television)(?:\s+on)?"
@@ -80,15 +91,25 @@ async def match_fast(s: str):
         return (f"Couldn't turn on TV: {r1.error.message}" if r1.error else "Couldn't turn on TV."), r1
 
     # ── TV Power ──
-    if re.match(r"^(turn on|switch on|power on)\s*(my |the )?(tv|telly|television)\s*[.!]?$", s):
-        r = await turn_on_tv()
-        return ("TV's turning on." if r.success else f"Couldn't turn on TV: {r.error.message}"), r
-
-    if re.match(r"^(turn off|switch off|power off)\s*(my |the )?(tv|telly|television)\s*[.!]?$", s):
+    # Handle "off"/"on" on EITHER side of the noun. Covers all of:
+    #   "turn off the tv" / "turn the tv off" / "turn my tv off"
+    #   "switch off the telly" / "switch off tv" / "telly off"
+    #   "power off my television" / "tv off"
+    if re.match(
+        r"^(?:turn|switch|power)\s+off\s+(?:my\s+|the\s+)?(?:tv|telly|television)$"
+        r"|^(?:turn|switch|power)\s+(?:my\s+|the\s+)?(?:tv|telly|television)\s+off$"
+        r"|^(?:my\s+|the\s+)?(?:tv|telly|television)\s+off$",
+        s,
+    ):
         r = await turn_off_tv()
         return ("TV's off." if r.success else f"Couldn't turn off TV: {r.error.message}"), r
 
-    if re.match(r"^(?:my |the )?(tv|telly|television)\s+(on)\s*[.!]?$", s):
+    if re.match(
+        r"^(?:turn|switch|power)\s+on\s+(?:my\s+|the\s+)?(?:tv|telly|television)$"
+        r"|^(?:turn|switch|power)\s+(?:my\s+|the\s+)?(?:tv|telly|television)\s+on$"
+        r"|^(?:my\s+|the\s+)?(?:tv|telly|television)\s+on$",
+        s,
+    ):
         r = await turn_on_tv()
         return ("TV's turning on." if r.success else f"Couldn't turn on TV: {r.error.message}"), r
 

@@ -23,3 +23,31 @@ test_tv_e2e.py
 # WhatsApp bridge
 friday/whatsapp/node_modules/
 friday/whatsapp/auth_state/
+
+# ── Private investigation / OSINT tooling ──
+# Not shipped in the public repo or pip package. Lives on Travis's machine only.
+# The orchestrator loads these conditionally — if absent, public clones run fine
+# without the investigation_agent registered.
+friday/tools/osint_tools.py
+friday/agents/investigation_agent.py
+docs/investigation.md
+
+# Per-case investigation outputs (Markdown reports)
+/Users/*/Friday/investigations/
+~/Friday/investigations/
+
+# ── Secrets / local state / editor junk (never commit) ──
+.webui_secret_key
+.claude/
+.vscode/
+**/xcuserdata/
+*.xcuserstate
+# Generated investigation artifact from local testing (personal OSINT output)
+angeloasante.txt
+favicon_io-7.zip
+
+# ── Private planning / strategy (not for the public repo) ──
+business-plan.md
+competitive-analysis.md
+Idea/
+Todo-folder/

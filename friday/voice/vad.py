@@ -21,15 +21,24 @@ class VoiceActivityDetector:
         self._speech_count = 0
         self._is_speaking = False
 
+    def speech_prob(self, chunk: np.ndarray) -> float:
+        """Return the raw Silero speech-probability (0..1) for one frame.
+
+        Used by barge-in detection in pipeline.py — it needs a stricter
+        threshold than the default ``is_speech()`` while TTS is playing
+        (Silero usually scores TTS-bleed-through 0.4-0.7, real human
+        speech >0.9).
+        """
+        tensor = torch.from_numpy(chunk.astype(np.float32) / 32768.0)
+        return self.model(tensor, SAMPLE_RATE).item()
+
     def is_speech(self, chunk: np.ndarray) -> bool:
         """Check if a single audio chunk contains speech.
 
         Args:
             chunk: int16 numpy array, 512 samples at 16kHz.
         """
-        tensor = torch.from_numpy(chunk.astype(np.float32) / 32768.0)
-        prob = self.model(tensor, SAMPLE_RATE).item()
-        return prob > VAD_THRESHOLD
+        return self.speech_prob(chunk) > VAD_THRESHOLD
 
     def feed(self, chunk: np.ndarray) -> str:
         """Feed a chunk and return state: 'speech', 'silence', or 'end'.

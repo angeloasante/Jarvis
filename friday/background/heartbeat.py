@@ -137,6 +137,12 @@ class HeartbeatRunner:
         self._started = False
         self._notify_fn = notify_fn or self._default_notify
         self._config = None
+        # Per-task counters: log "couldn't extract contact" once per task
+        # per session, then disable the task in the DB after MAX failures
+        # so a misrouted watch can't spam the log forever.
+        self._contact_extract_failures: dict[str, int] = {}
+        self._warned_no_contact: set[str] = set()
+        self.MAX_CONTACT_EXTRACT_FAILURES: int = 3
 
     def _load_config(self) -> dict:
         try:
@@ -404,7 +410,7 @@ class HeartbeatRunner:
             candidates = _self_chat_contact_candidates()
             contact = candidates[0] if candidates else _user_name()
         if not contact:
-            log.warning(f"Watch task '{task['id']}': couldn't extract contact from instruction.")
+            self._note_contact_extract_failure(task, channel="imessage")
             return
 
         if is_self_chat:
@@ -874,7 +880,7 @@ RULES:
         # Step 1: Extract contact name
         contact = self._extract_contact(instruction)
         if not contact:
-            log.warning(f"WhatsApp watch '{task['id']}': couldn't extract contact from instruction.")
+            self._note_contact_extract_failure(task, channel="whatsapp")
             return
 
         # Step 2: Read latest messages
@@ -1377,6 +1383,46 @@ RULES:
         except Exception:
             pass
         return ""
+
+    # ── Misroute handling — keep the logs clean ───────────────────────────
+
+    def _note_contact_extract_failure(self, task: dict, channel: str) -> None:
+        """Record a "couldn't extract contact" failure for a watch task.
+
+        - Log the warning at most once per task per process lifetime.
+        - After ``MAX_CONTACT_EXTRACT_FAILURES`` consecutive failures,
+          mark the task ``active=0`` in SQLite so it stops firing. The
+          task is almost certainly misrouted (e.g. a job-application
+          instruction stored as an iMessage watch) and there's no
+          recovery from polling it forever.
+        """
+        tid = str(task.get("id", "?"))
+        n = self._contact_extract_failures.get(tid, 0) + 1
+        self._contact_extract_failures[tid] = n
+
+        if tid not in self._warned_no_contact:
+            self._warned_no_contact.add(tid)
+            instr = (task.get("instruction") or "").strip().replace("\n", " ")
+            log.warning(
+                f"Watch task '{tid}' ({channel}): couldn't extract contact from "
+                f"instruction → {instr[:80]!r}. Will retry up to "
+                f"{self.MAX_CONTACT_EXTRACT_FAILURES}× then auto-disable."
+            )
+
+        if n >= self.MAX_CONTACT_EXTRACT_FAILURES:
+            self._disable_watch_task(tid, reason="no contact extractable")
+
+    @staticmethod
+    def _disable_watch_task(task_id: str, reason: str = "") -> None:
+        """Mark a watch task inactive in SQLite. Best-effort; logs and moves on."""
+        try:
+            from friday.memory.store import get_memory_store
+            db = get_memory_store().db
+            db.execute("UPDATE watch_tasks SET active=0 WHERE id = ?", (task_id,))
+            db.commit()
+            log.warning(f":: watch task '{task_id}' auto-disabled — {reason}")
+        except Exception as e:
+            log.debug(f"couldn't disable watch '{task_id}': {e}")
 
     # ── Contact extraction ────────────────────────────────────────────────
 

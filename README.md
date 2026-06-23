@@ -86,17 +86,24 @@ FRIDAY (32s) Three things. Global Talent page updated,
   your MP tweeted about digital infrastructure,
   calendar's empty...
 
-You: "watch my partner's messages for the next hour, reply as friday"
-FRIDAY: Got it. Watching every 60 seconds.
-  💛 FRIDAY Watch — replied:
-  "FRIDAY: She's building me right now, I'll let her
-  know you texted."
+You: "search the web for YC travel-tech news AND check if Ellen texted me"
+FRIDAY: On it.
+  ◈ dispatch plan (parallel) — 2 agents
+  ◈ research + comms running at once
+FRIDAY (9s) YC just backed two travel startups this batch...
+  and yeah, Ellen texted 20 mins ago: "call me when you're free"
+
+You: "background check on this guy then format it into a doc then telegram it to me"
+FRIDAY: Got you.
+  ◈ dispatch plan (sequential chain) — 3 agents
+  ◈ investigation → code → comms, output flowing forward
+FRIDAY: Sent the doc to your Telegram.
 
 You (in iMessage): "I'm innocent 😂 @friday defend me here wai"
   💛 FRIDAY Watch — tagged mid-conversation, jumped in.
 ```
 
-That last one actually happens. `@friday` mid-chat, FRIDAY picks it up, replies in your thread. The other person thinks you're having a laugh.
+Two things there worth calling out. FRIDAY knows when tasks are **independent** (run them in parallel) versus **chained** (run them in order, feed each output forward) — and decides which on its own. And `@friday` mid-chat? It picks it up and replies in your thread. The other person thinks you're having a laugh.
 
 ### Capabilities at a glance
 
@@ -110,6 +117,7 @@ That last one actually happens. `@friday` mid-chat, FRIDAY picks it up, replies 
 | **Files + PDF** | 13 | Read/write/search files, PDF read/write/merge/split/rotate/encrypt/watermark |
 | **Web research** | 3 | Tavily search, page fetch, YouTube transcripts |
 | **Autonomy** | 10+ | Heartbeat, cron, watch tasks (standing orders), monitors, briefings |
+| **Orchestration** | — | One prompt, many agents — runs them in parallel when independent, as dependency-ordered chains when one needs another's output (capped at 4 concurrent). A lie guard catches "I've queued a run" with nothing behind it and actually does the work. |
 | **Memory** | 3 | ChromaDB vector + SQLite structured, auto-learn from corrections |
 | **Other** | 30+ | Jobs/CV, GitHub, screencast, terminal, call history |
 
@@ -124,7 +132,7 @@ Every major subsystem has its own doc. Read the ones relevant to what you're doi
 | Topic | Doc | In one line |
 |---|---|---|
 | Installing + onboarding | [docs/install.md](docs/install.md) | Five pathways, `friday onboard`, `friday doctor`, `friday update` |
-| System architecture | [docs/architecture.md](docs/architecture.md) | 7-tier routing, system-prompt assembly, provider abstraction |
+| System architecture | [docs/architecture.md](docs/architecture.md) | 7-tier routing, parallel/sequential multi-agent dispatch, the lie guard, system-prompt assembly, provider abstraction |
 | Project structure | [docs/project-structure.md](docs/project-structure.md) | Map of the codebase for contributors |
 | CLI commands | [docs/cli-commands.md](docs/cli-commands.md) | Every shell command + REPL slash command |
 | Agents | [docs/agents.md](docs/agents.md) | All 10 specialist agents, scopes, tools, routing |
@@ -155,13 +163,14 @@ Each one is a one-shot wizard. Paste your API key (or log in via OAuth) and it's
 | **Ollama** *(local LLM)* | see guide | Fully local inference, privacy, offline | [docs/ollama-setup.md](docs/ollama-setup.md) |
 | **Tavily** *(web search — primary)* | `friday setup tavily` | Agent-optimised web search, research + briefings | [docs/setup-tavily.md](docs/setup-tavily.md) |
 | **Firecrawl** *(web search fallback + scrape)* | `friday setup firecrawl` | Auto-fallback when Tavily caps out; also upgrades fetch_page output. 500 free credits, no card. | — |
+| **Browser bridge** *(Chrome extension)* | `friday setup browser-ext` | Lets agents act in your *real* Chrome — logged-in sessions, anti-bot pages, "fill the form on my screen". Visual overlay shows what FRIDAY is reading. Coexists with the Playwright path. | [docs/browser-extension.md](docs/browser-extension.md) |
 | **Gmail + Calendar** | `friday setup gmail` | Read/search/draft/send mail, calendar events — bundled OAuth, just sign in | [docs/setup-google.md](docs/setup-google.md) |
 | **Twilio SMS** | `friday setup twilio` | Text FRIDAY from any phone, outbound SMS | [docs/sms-setup.md](docs/sms-setup.md) |
 | **Telegram** | `friday setup telegram` | Second channel, 50 MB/file rich media, voice notes with audio-tag emotion (Eleven v3), cross-channel SMS → Telegram delivery of docs/images/voice. No tunnel, free. | [docs/telegram.md](docs/telegram.md) |
 | **ElevenLabs TTS** | `friday setup elevenlabs` | Cloud voice (~75ms live, Eleven v3 with audio tags for voice notes). Optional — Kokoro runs locally if you skip. | [docs/setup-voice.md](docs/setup-voice.md) |
 | **X (Twitter)** | `friday setup x` | Post, mentions, search, retweets, likes | — |
 | **WhatsApp** | see guide | Read/send WhatsApp via local Baileys bridge | [docs/whatsapp-setup.md](docs/whatsapp-setup.md) |
-| **Voice** | `friday setup voice` | Always-on ambient listen, wake word "Friday". Optional WebSocket input streaming (`FRIDAY_TTS_INPUT_STREAMING=true`) for token-by-token TTS. Engineering deep-dive in [docs/voice-pipeline.md](docs/voice-pipeline.md). | [docs/setup-voice.md](docs/setup-voice.md) |
+| **Voice** | `friday setup voice` | Always-on ambient listen, wake word "Friday". Talk over FRIDAY to interrupt — four-guard barge-in (energy gate + Silero confidence + sustained frames + grace period) suppresses TV / room ambient false-triggers. Response runs on its own worker thread so the audio loop never blocks. Optional WebSocket input streaming (`FRIDAY_TTS_INPUT_STREAMING=true`) for token-by-token TTS. Engineering deep-dive in [docs/voice-pipeline.md](docs/voice-pipeline.md). | [docs/setup-voice.md](docs/setup-voice.md) |
 | **Gestures** | `friday setup gestures` | Camera-based hand control, 29 gestures | [docs/gesture-control.md](docs/gesture-control.md) |
 
 Run `friday doctor` any time to see which integrations are live and which aren't.
@@ -178,14 +187,16 @@ The same file drives:
 - **Job applications** — CV fields populate every form
 - **Briefings** — watchlist decides what X handles + topics to surface
 
-Edit it any time: `friday config edit` · `friday config open` · or Mac app → Settings → Profile. Full schema + example → **[docs/user-config.md](docs/user-config.md)**.
+Go one level deeper with **`~/Friday/SOUL.md`** — a plain-text file you own that defines who FRIDAY *is* at the core (who it serves, how it carries itself, what it refuses to do). It's read fresh into every prompt and sits above the built-in voice rules. Edit it, and FRIDAY changes at the root.
+
+Edit the profile any time: `friday config edit` · `friday config open` · or Mac app → Settings → Profile. Full schema + example → **[docs/user-config.md](docs/user-config.md)**.
 
 ---
 
 ## Design philosophy
 
 1. **Speed first, local always available** — cloud inference via Groq/OpenRouter for sub-second LLM calls. Automatic fallback to local Ollama when offline. Remove the API key and everything runs on your machine.
-2. **Agents are specialists** — each agent gets focused context and tools. No god-agent.
+2. **Agents are specialists, but they coordinate** — each agent gets focused context and tools. No god-agent. When a request spans several, FRIDAY decomposes it and runs the agents in parallel or as a dependency-ordered chain, then weaves the results into one answer.
 3. **Memory is identity** — FRIDAY remembers you. That's what makes it personal.
 4. **Speed over perfection** — streaming, think control, fast routing. Latency kills the vibe.
 5. **Personality is not optional** — a tool without personality is just a tool.

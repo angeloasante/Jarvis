@@ -237,6 +237,20 @@ def doctor() -> int:
         else "optional — run `friday setup firecrawl` (500 free credits)"
     ))
 
+    # Browser extension — token minted, but extension may or may not be installed
+    has_bx_token = bool(
+        env.get("FRIDAY_BROWSER_EXT_TOKEN")
+        or os.environ.get("FRIDAY_BROWSER_EXT_TOKEN")
+    )
+    bx_detail = (
+        "token minted — install the extension via `friday setup browser-ext`"
+        if has_bx_token else
+        "optional — run `friday setup browser-ext` (act in user's real Chrome)"
+    )
+    rows.append(_check(
+        "Browser bridge (Chrome extension)", has_bx_token, bx_detail,
+    ))
+
     # Twilio
     has_twilio = all(env.get(k) or os.environ.get(k) for k in
                      ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER"))
@@ -428,6 +442,7 @@ def onboard() -> int:
             ("X / Twitter",         lambda: _step_optional("X", setup_x)),
             ("Voice",               lambda: _step_optional("Voice", setup_voice)),
             ("Gestures",            lambda: _step_optional("Gestures", setup_gestures)),
+            ("Browser extension (act in your real Chrome)", lambda: _step_optional("Browser extension", setup_browser_ext)),
         ]
     steps.append(("Health check", _step_doctor))
 
@@ -695,6 +710,58 @@ def setup_tavily() -> int:
         blurb="Web search used by the research agent. Free tier covers normal use.",
         prefix="tvly-",
     )
+
+
+def setup_browser_ext() -> int:
+    """Walk the user through installing the FRIDAY browser-bridge Chrome
+    extension. The extension lets agents act in the user's *real* Chrome
+    (logged-in sessions, anti-bot pages, "fill the form on my screen"),
+    complementing the headless Playwright path.
+    """
+    import subprocess
+    from pathlib import Path
+
+    console.print()
+    console.print(Rule("FRIDAY browser bridge (Chrome extension)", style="green"))
+    console.print()
+
+    # Locate the extension folder relative to this install
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    ext_dir = repo_root / "extension" / "browser-bridge"
+    if not ext_dir.is_dir():
+        console.print(f"  [red]Couldn't find {ext_dir}.[/red]")
+        console.print("  This setup needs the FRIDAY repo on disk. Run from the source checkout.")
+        return 2
+
+    # Ensure the bridge has minted a token
+    from friday.browser_ext.bridge import _read_or_create_token
+    token = _read_or_create_token()
+
+    console.print(f"  [bold]Step 1[/bold] — open Chrome and go to: [cyan]chrome://extensions[/cyan]")
+    console.print(f"  [bold]Step 2[/bold] — toggle [cyan]Developer mode[/cyan] (top-right)")
+    console.print(f"  [bold]Step 3[/bold] — click [cyan]Load unpacked[/cyan] and pick this folder:")
+    console.print(f"             [cyan]{ext_dir}[/cyan]")
+    console.print(f"  [bold]Step 4[/bold] — click the FRIDAY icon in the toolbar, paste this token:")
+    console.print(f"             [bold yellow]{token}[/bold yellow]")
+    console.print(f"             then click [cyan]Save & Connect[/cyan].")
+    console.print()
+    console.print("  [dim]The token is also in your ~/Friday/.env as FRIDAY_BROWSER_EXT_TOKEN.[/dim]")
+    console.print()
+
+    if _confirm("Open the extensions folder in Finder now?", default=True):
+        try:
+            subprocess.run(["open", str(ext_dir)], check=False)
+        except Exception:
+            pass
+    if _confirm("Open chrome://extensions in your default browser now?", default=True):
+        try:
+            subprocess.run(["open", "chrome://extensions"], check=False)
+        except Exception:
+            pass
+
+    console.print()
+    console.print("  Once installed, run [cyan]friday[/cyan] and check [cyan]/browser-ext[/cyan].")
+    return 0
 
 
 def setup_firecrawl() -> int:
@@ -1531,8 +1598,10 @@ _SETUP_COMMANDS: dict[str, Callable[[], int]] = {
     "openrouter": setup_openrouter,
     "gemma":      setup_gemma,
     "groq":       setup_groq,
-    "tavily":     setup_tavily,
-    "firecrawl":  setup_firecrawl,
+    "tavily":         setup_tavily,
+    "firecrawl":      setup_firecrawl,
+    "browser-ext":    setup_browser_ext,
+    "browser_ext":    setup_browser_ext,   # tolerant alias
     "elevenlabs": setup_elevenlabs,
     "x":          setup_x,
     "twilio":     setup_twilio,

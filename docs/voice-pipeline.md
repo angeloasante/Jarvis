@@ -221,14 +221,72 @@ If `FRIDAY_TTS_INPUT_STREAMING=true` is set and the WebSocket fails to connect, 
 
 ---
 
-## 4. Anti-feedback: muting during TTS
+## 4. Barge-in (always on)
 
-If FRIDAY's own voice goes through your microphone, it'll get transcribed and the trigger word "friday" inside its own response could activate it again. Two safeguards:
+You can interrupt FRIDAY mid-sentence by speaking. The mic stays open during TTS playback and a stricter VAD pass watches for sustained human speech. On detection the pipeline calls `self._tts.stop()` and processes your interruption immediately — no waiting for FRIDAY to finish.
 
-1. `_muted = True` set in [`pipeline.py:383`](../friday/voice/pipeline.py#L383) before TTS; the audio capture loop at [`pipeline.py:307-309`](../friday/voice/pipeline.py#L307-L309) skips frames while `_muted` is True. Reset to False in `finally`.
-2. The hallucination filter ignores transcripts ≤ 2 chars and well-known Whisper noise outputs.
+### 4.1 Threading model — why barge-in needs its own thread
 
-This is sufficient for typical laptop-speaker volumes. It's not bulletproof — if you push speakers loud enough to bleed during the gap between sentences, you can still echo. Use headphones for high-volume scenarios.
+The naive design ("run TTS in the audio loop thread") doesn't work, because while `_tts.speak()` is playing, the audio thread is blocked inside it — it never gets back to reading the next mic frame, never feeds VAD, never fires barge-in.
+
+The fix: **the response runs on a separate worker thread**. When `_on_triggered` (or `_on_followup`) decides to respond, it spawns `friday-voice-response` via `_start_response()`:
+
+```
+audio thread (never blocks)               response worker thread
+─────────────────────────────              ──────────────────────
+read mic frame → VAD                       _tts.speak(...)
+                                                ▲
+"Friday, tell me about AR"                      │ playing audio
+   → _start_response() ───────────────────────┘
+read mic frame → strict-VAD pass
+read mic frame → user says "wait"
+read mic frame → energy 4800, prob 0.96  count++
+... 12 such frames stack up ...
+⚡ barge-in confirmed
+   → self._tts.stop() ─────────────────────►  _interrupted=True, breaks
+   → seed audio_buffer with current frame      finally: _tts_playing=False
+   → _vad.reset()
+read mic frame → normal VAD path now
+... user keeps talking ...
+VAD says "end" → transcribe → handle text
+   → _start_response (joins old thread, spawns new one)
+```
+
+`_start_response()` is the single entry point — if a response is already in flight (you barged in or two utterances arrived back-to-back), it stops the existing TTS and joins the old thread before spawning the new one.
+
+### 4.2 Four guards against false triggers
+
+| Guard | Default | Filters |
+|---|---|---|
+| **Grace period** | 400 ms | Tail of your last word echoing back from speakers as TTS starts |
+| **Energy gate** | 1000 RMS | TV / radio / room conversation through speakers — those land at 200–800 RMS at the laptop mic; direct user speech is 2000–10000+ |
+| **Silero confidence** | 0.92 | Strong-speech-only — TTS bleed-through usually scores 0.4–0.7, real human speech >0.95 |
+| **Sustained-speech requirement** | 12 frames (~384 ms) | One loud burst (door slam, cough) won't trigger; needs continuous speech |
+
+The energy gate runs first because it's the cheapest check. It alone filters most false triggers without needing the (more expensive) Silero pass. Diagnostic line in the log when barge-in fires:
+
+```
+⚡ Barge-in — stopping FRIDAY  (energy=4823, prob=0.96)
+```
+
+When all four pass, [`pipeline.py:_ambient_loop_local()`](../friday/voice/pipeline.py) calls `self._tts.stop()` (which sets `_interrupted = True`, calls `sd.stop()`, and tears down the OutputStream) and seeds the audio buffer with the speech that triggered the interrupt — so your interruption is captured cleanly without losing the start.
+
+### 4.3 Tunables
+
+These are runtime attributes on the `VoicePipeline` instance (not env vars). Edit them in [`friday/voice/pipeline.py`](../friday/voice/pipeline.py) `__init__` to retune for your mic / room.
+
+| Attribute | Default | When to change |
+|---|---|---|
+| `_barge_in_grace_s` | 0.4 | Lower (0.2) for snappier interrupt; higher (0.6) if your last word keeps triggering false interrupts |
+| `_barge_in_min_energy` | 1000 RMS | Lower (600) if your mic is quiet and real speech isn't getting through; higher (1500–2000) if TV / room ambient still triggers |
+| `_barge_in_threshold` | 0.92 | Lower (0.85) if real speech isn't passing the VAD; higher (0.95) only if Silero is over-confident on your mic |
+| `_barge_in_min_frames` | 12 | Lower (8) for faster interrupt; higher (16) for stricter sustained-speech requirement |
+
+The hallucination filter (transcripts ≤ 2 chars + known Whisper noise outputs) still runs after STT so spurious echoes that somehow get through don't end up looking like trigger-word activations.
+
+**Tip: headphones make this near-perfect.** No echo means lower energy/confidence thresholds work and interrupts feel instant. With laptop speakers at moderate volume the defaults above are usually fine.
+
+`/listening-off` still hard-mutes the mic if you want to disable both ambient capture *and* barge-in temporarily.
 
 ---
 
@@ -256,7 +314,17 @@ else:
 
 `run_coroutine_threadsafe` is required because the voice thread is **not** the asyncio event loop — `FridayCore` lives on the main loop, voice lives on `friday-voice` daemon thread.
 
-### Started where
+### Fast-path filler tolerance
+
+Voice transcripts pick up natural-speech filler that wouldn't appear in typed input — leading politeness ("please", "now", "finally", "okay", "alright", "yo", "hey", "right"), trailing tail ("please", "for me", "thanks", "mate", "bro"), and either-side commas. These would otherwise break the `^…$`-anchored regex patterns in `fast_path.py`.
+
+[`fast_path.match_fast`](../friday/core/fast_path.py) strips them at the top of the function so phrasings like:
+
+- *"Finally, turn my TV off please"* → matches the TV-off pattern
+- *"Hey, switch off the telly mate"* → matches
+- *"Okay, turn the music off thanks"* → matches
+
+…all hit the zero-LLM path. The TV power patterns also accept "off"/"on" on either side of the noun (`turn off the tv`, `turn the tv off`, `tv off`) — voice users phrase commands inconsistently and the fast path needs to keep up if it's going to spare the LLM round-trip.
 
 ```python
 # friday/cli.py:145-153
@@ -361,7 +429,7 @@ If `_run` prints `✗ Voice init failed: …` the most common causes are:
 ## 9. What this design deliberately doesn't do
 
 - **No always-on cloud STT.** `cloud_stt.py` exists for a hypothetical ElevenLabs Scribe Realtime mode but the active pipeline runs local Whisper. Cloud STT would mean every word you say leaves your machine — that's the wrong default for a personal AI OS, even with the wake-word approach.
-- **No barge-in.** You can't interrupt FRIDAY mid-sentence by speaking — the mic is muted during TTS. Adding barge-in means VAD running parallel to TTS playback with echo cancellation, which is doable but complicated. Future work.
+- **Barge-in is on by default.** Talk over FRIDAY any time — the four guards in §4.2 (grace period, energy gate, Silero confidence, sustained frames) suppress TV / room / echo false-triggers. If your specific mic/speaker pairing misfires, retune the per-instance attributes (`_barge_in_min_energy`, `_barge_in_threshold`, `_barge_in_grace_s`, `_barge_in_min_frames`) — see §4.3.
 - **No multi-speaker diarization.** Whisper produces one stream of text. If two people are talking, both end up in the rolling transcript without speaker labels. Good enough for personal assistant use.
 - **No custom wake-word model.** Currently uses literal-word matching against the transcript (`"friday"` regex). [`wake_word.py`](../friday/voice/wake_word.py) has scaffolding for an OpenWakeWord-based pretrained model (`hey_jarvis` is the closest open weight) but it's not the active path. Trigger-from-transcript works well enough that we haven't switched.
 
@@ -373,12 +441,17 @@ If `_run` prints `✗ Voice init failed: …` the most common causes are:
 friday/voice/
 ├── __init__.py
 ├── config.py            # 42 lines — every magic number lives here
-├── vad.py               # 59 lines — Silero wrapper, three-state machine
+├── vad.py               # 68 lines — Silero wrapper, three-state machine.
+│                        #   Adds speech_prob() returning the raw 0..1 confidence
+│                        #   (barge-in needs this for the stricter-threshold check).
 ├── stt.py               # 47 lines — MLX Whisper wrapper + warmup
-├── tts.py               # ~410 lines — Speaker class:
+├── tts.py               # ~460 lines — Speaker class:
 │                        #   ├ speak()           — HTTP /stream (one-shot input, streamed output)
 │                        #   └ speak_streaming() — WebSocket /stream-input (token-by-token in, audio out)
-├── pipeline.py          # ~680 lines — the daemon thread, ambient loop, trigger, dispatch:
+├── pipeline.py          # ~770 lines — the daemon thread, ambient loop, trigger, dispatch:
+│                        #   ├ _ambient_loop_local()          — mic loop with barge-in detector
+│                        #   ├ _start_response()              — spawns the response worker thread
+│                        #   ├ _respond()                     — runs in worker; sets _tts_playing
 │                        #   ├ _process_and_speak()           — sentence-batched HTTP TTS
 │                        #   └ _process_and_speak_streaming() — chunk-streamed WS TTS (FRIDAY_TTS_INPUT_STREAMING=true)
 ├── response_filter.py   # 67 lines — strip code/markdown for spoken output

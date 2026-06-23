@@ -1,0 +1,21 @@
+# SpiderFoot — heavyweight OSINT engine for FRIDAY's investigation agent (phase 2).
+#
+#   cd deploy/spiderfoot && docker compose up -d
+#   then add to ~/Friday/.env:   SPIDERFOOT_URL=http://127.0.0.1:5001
+#
+# Optional API keys (Shodan, VirusTotal, DeHashed, etc.) are configured in
+# SpiderFoot's own Settings UI at http://127.0.0.1:5001 once it's up.
+#
+# Stop:   docker compose down      Data persists in the named volume below.
+services:
+  spiderfoot:
+    image: ghcr.io/poppopjmp/spiderfoot:latest   # maintained OSS fork; or: smicallef/spiderfoot
+    container_name: friday-spiderfoot
+    ports:
+      - "127.0.0.1:5001:5001"     # bind to localhost only — not exposed to the network
+    volumes:
+      - spiderfoot-data:/var/lib/spiderfoot
+    restart: unless-stopped
+
+volumes:
+  spiderfoot-data:
